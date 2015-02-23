@@ -1,0 +1,1641 @@
+!-------------------------------------------------------------------------
+        subroutine angular_wfnpz_d(wavefn,nkpt,kxyz,tau,rc,cart,  &
+                          kkx,kky,kkz,vcell,myproc,ngrid,step,Rl,cnk, &
+                          cnk_f, Rlm,proj_flag,syms,reduced)
+
+        use all_to_all_module
+        use symmetry_module
+
+        implicit none
+m4_ifdef([MPI],[
+      include 'mpif.h'
+])
+
+	integer ii,jj,kk,ll,ngrid,ierr,myproc,proj_flag,ifrac,im
+        integer nkpt,kxyz(3,nkpt)
+        logical::reduced
+        double precision tau(3),rc,kkx,kky,kkz,cart(3,3),vcell,Rl(ngrid)
+	complex (kind=8) wavefn(nkpt)
+        double complex::Rlm(ngrid,5)
+
+	double precision k1,k2,k3,kx,ky,kz,kgr
+
+        double complex::cnk(5),cnk_f(5,48)
+
+	double precision r1,r2,r3,r4,r5,r6,r7,r8,k10,k20,k30,ekin0
+        double precision ekin,const1,const2,const3,const0,const21,const22
+        double precision SBESSJ,kgdotr0,scale,step,norm,step2,gdotts
+	double complex::  phase,ylm(5),ione,itwo,ctem1,ctem4,ctem11(3)
+
+        double complex, allocatable::Rlm_sum(:,:)
+        double complex, allocatable::Rlm2(:,:)
+        double complex, allocatable::Rlmf(:,:,:),Rlm2f(:,:,:)
+        double complex, allocatable::ctem2(:),ctem3(:),ctemf(:),ctem22(:,:)
+
+        type(symmetry),intent(in):: syms
+
+
+        ifrac=0
+        if(syms%nfrac.ne.0) then
+          ifrac=1
+          allocate(Rlmf(ngrid,5,syms%nfrac))
+          allocate(Rlm2f(ngrid,5,syms%nfrac))
+          allocate(ctemf(ngrid))
+          allocate(ctem3(ngrid))
+          Rlmf=(0.d0,0.d0)
+        end if
+
+        ione=cmplx(0.d0,1.d0,kind=8)
+        itwo=cmplx(0.d0,2.d0,kind=8)
+      
+        const1=dsqrt(15.d0/(8.d0*pi4))
+        const2=dsqrt(15.d0/(2.d0*pi4))
+        const3=dsqrt(5.d0/(4.d0*pi4))
+
+!============================================================================
+!
+       allocate(ctem2(ngrid))
+         
+       step2=step*step
+       allocate(Rlm2(ngrid,5))
+      
+       Rlm(:,:)=(0.d0,0.d0)
+
+! sum over G points
+
+! Rlm(r)=4\pi i^l e(ikr_0)\sum_G C^k(G) e(iGr_0) j_l(|k+G|r)Y_lm(\Omega_{k+G})
+!
+! where k is the wavevector in BZ, r_0 is the position of the atom of interest.
+!  
+
+
+           k10 = cart(1,1)*kkx+cart(1,2)*kky+cart(1,3)*kkz
+           k20 = cart(2,1)*kkx+cart(2,2)*kky+cart(2,3)*kkz
+           k30 = cart(3,1)*kkx+cart(3,2)*kky+cart(3,3)*kkz
+
+
+      do jj=1,nkpt
+
+           k1=kxyz(1,jj)
+           k2=kxyz(2,jj)
+           k3=kxyz(3,jj)
+
+           kx = cart(1,1)*k1+cart(1,2)*k2+  &
+                cart(1,3)*k3+k10
+           ky = cart(2,1)*k1+cart(2,2)*k2+  &
+                cart(2,3)*k3+k20
+           kz = cart(3,1)*k1+cart(3,2)*k2+  &
+                cart(3,3)*k3+k30
+           
+           kgdotr0=(kx*tau(1)+ky*tau(2)+kz*tau(3))
+
+           ekin = kx*kx+ky*ky+kz*kz
+ 
+           if(ekin.lt.(1.d-10)) then
+              ylm(1)=(0.d0,0.d0)
+              ylm(2)=(0.d0,0.d0)
+              ylm(3)=(0.d0,0.d0)
+              ylm(4)=(0.d0,0.d0)
+              ylm(5)=(0.d0,0.d0)
+           else
+              ylm(1)= const1*(kx*kx-ky*ky+itwo*kx*ky)/ekin       !Y2(-2)^*
+              ylm(2)= const2*(kx*kz+ione*ky*kz)/ekin             !Y2(-1)^*
+              ylm(3)= const3*(3.d0*kz*kz/ekin-1.d0)              !Y2(0)^*
+              ylm(4)= -DCONJG(ylm(2))                            !Y2(1)^*
+              ylm(5)= DCONJG(ylm(1))                             !Y2(2)^*
+          end if
+         
+
+! loop over radial points
+
+          phase=exp(cmplx(0.0d0,kgdotr0,kind=8))
+          ctem1=phase*wavefn(jj)
+
+          ekin0=dsqrt(ekin)*step
+
+          do ii=1,ngrid
+             kgr=ekin0*ii
+             ctem2(ii)=ctem1*SBESSJ(2,kgr)
+          end do
+
+          do ii=1,ngrid
+             do im=1,5
+             Rlm(ii,im)=Rlm(ii,im)+ctem2(ii)*ylm(im)
+             end do
+          end do
+
+!----------------------------------------
+! for systems with fractional translations
+
+          if(ifrac.eq.1) then
+
+          do kk=1,syms%nfrac
+             gdotts=k1*syms%tnp(1,syms%indfrac(kk))+k2*syms%tnp(2,syms%indfrac(kk))+ &
+                    k3*syms%tnp(3,syms%indfrac(kk))
+             ctemf(kk)=exp(cmplx(0.0d0,gdotts,kind=8))
+          end do
+
+          do kk=1,syms%nfrac
+
+             ctem3(:)=ctem2(:)*ctemf(kk)
+
+          do ii=1,ngrid
+             Rlmf(ii,1,kk)=Rlmf(ii,1,kk)+ctem3(ii)*ylm(1)
+             Rlmf(ii,2,kk)=Rlmf(ii,2,kk)+ctem3(ii)*ylm(2)
+             Rlmf(ii,3,kk)=Rlmf(ii,3,kk)+ctem3(ii)*ylm(3)
+             Rlmf(ii,4,kk)=Rlmf(ii,4,kk)+ctem3(ii)*ylm(4)
+             Rlmf(ii,5,kk)=Rlmf(ii,5,kk)+ctem3(ii)*ylm(5)
+          end do
+          end do
+
+          end if
+!----------------------------------------
+
+       end do
+
+! 4*pi is the Bessel-Fourier transform factor, vcell is the wavefunction
+! normalization fortor.
+!
+m4_ifdef([MPI],[
+       allocate(Rlm_sum(ngrid,5))
+        Rlm_sum(:,:)=(0.d0,0.d0)
+        do jj=1,5
+        call MPI_ALLREDUCE(Rlm(1,jj),Rlm_sum(1,jj),ngrid,MPI_DOUBLE_COMPLEX,  &
+         MPI_SUM,MPI_COMM_WORLD,ierr)
+        end do
+        Rlm(:,:)=Rlm_sum(:,:)
+
+
+! systems with fractional translations
+        if(ifrac.eq.1) then
+
+        do ii=1,syms%nfrac
+           Rlm_sum(:,:)=(0.d0,0.d0)
+           do jj=1,5
+              call MPI_ALLREDUCE(Rlmf(1,jj,ii),Rlm_sum(1,jj),ngrid,MPI_DOUBLE_COMPLEX,  &
+                                 MPI_SUM,MPI_COMM_WORLD,ierr)
+           end do
+           Rlmf(:,:,ii)=Rlm_sum(:,:)
+        end do
+        end if
+
+        deallocate(Rlm_sum)
+])
+       
+       Rlm(:,:)=Rlm(:,:)*pi4/dsqrt(vcell)
+       if(ifrac.eq.1) Rlmf(:,:,:)=Rlmf(:,:,:)*pi4/dsqrt(vcell)
+
+!---------------------------------------------------
+       if(proj_flag.eq.1) then
+
+       do kk=1,5
+       do ii=1,ngrid
+          Rlm2(ii,kk)=Rl(ii)*Rlm(ii,kk)
+       end do
+       end do
+
+
+       if(ifrac.eq.1) then
+
+         do jj=1,syms%nfrac
+         do kk=1,5
+            do ii=1,ngrid
+               Rlm2f(ii,kk,jj)=Rl(ii)*Rlmf(ii,kk,jj)
+            end do
+         end do
+         end do
+
+       end if
+
+       else
+
+       do kk=1,5
+       do ii=1,ngrid
+          Rlm2(ii,kk)=Rlm(ii,kk)*DCONJG(Rlm(ii,kk))
+       end do
+       end do
+
+       if(ifrac.eq.1) then
+         do jj=1,syms%nfrac
+         do kk=1,5
+            do ii=1,ngrid
+               Rlm2f(ii,kk,jj)=Rlmf(ii,kk,jj)*DCONJG(Rlmf(ii,kk,jj))
+            end do
+         end do
+         end do
+       end if
+
+       end if
+
+!---------------------------------------------------
+
+! do integration in real space from the atomic position to cutoff r_C
+
+       cnk=(0.d0,0.d0)
+
+       do kk=1,5
+       do ii=1,ngrid-7,7
+          r1=ii*ii
+          r2=(ii+1)*(ii+1)
+          r3=(ii+2)*(ii+2)
+          r4=(ii+3)*(ii+3)
+          r5=(ii+4)*(ii+4)
+          r6=(ii+5)*(ii+5)
+          r7=(ii+6)*(ii+6)
+          r8=(ii+7)*(ii+7)
+
+          cnk(kk)=cnk(kk)+    &
+          751.d0*(r1*Rlm2(ii,kk)+ r8*Rlm2(ii+7,kk))+    &
+          3577.d0*(r2*Rlm2(ii+1,kk)+r7*Rlm2(ii+6,kk))+    &
+          1323.d0*(r3*Rlm2(ii+2,kk)+r6*Rlm2(ii+5,kk))+    &
+          2989.d0*(r4*Rlm2(ii+3,kk)+r5*Rlm2(ii+4,kk))
+
+
+       end do
+       end do
+
+       if(ifrac.eq.1) then
+
+       cnk_f=(0.d0,0.d0)
+
+       do jj=1,syms%nfrac
+
+       do kk=1,5
+       do ii=1,ngrid-7,7
+          r1=ii*ii
+          r2=(ii+1)*(ii+1)
+          r3=(ii+2)*(ii+2)
+          r4=(ii+3)*(ii+3)
+          r5=(ii+4)*(ii+4)
+          r6=(ii+5)*(ii+5)
+          r7=(ii+6)*(ii+6)
+          r8=(ii+7)*(ii+7)
+
+          cnk_f(kk,jj)=cnk_f(kk,jj)+    &
+          751.d0*(r1*Rlm2f(ii,kk,jj)+ r8*Rlm2f(ii+7,kk,jj))+    &
+          3577.d0*(r2*Rlm2f(ii+1,kk,jj)+r7*Rlm2f(ii+6,kk,jj))+    &
+          1323.d0*(r3*Rlm2f(ii+2,kk,jj)+r6*Rlm2f(ii+5,kk,jj))+    &
+          2989.d0*(r4*Rlm2f(ii+3,kk,jj)+r5*Rlm2f(ii+4,kk,jj))
+       end do
+       end do
+       end do
+       end if
+
+      scale=step*step2*(7.d0/17280.d0)
+
+      cnk=cnk*scale
+
+      if(ifrac.eq.1) cnk_f=cnk_f*scale
+
+      if(proj_flag.ne.1) then
+         cnk=sqrt(cnk)
+         if(ifrac.eq.1) cnk_f=sqrt(cnk_f)
+      end if
+        
+      deallocate(Rlm2)
+      deallocate(ctem2)
+
+      if(ifrac.eq.1) then
+        deallocate(Rlmf)
+        deallocate(Rlm2f)
+        deallocate(ctem3)
+        deallocate(ctemf)
+      end if
+
+
+      return
+      end
+
+!-------------------------------------------------------------------------
+        subroutine angular_wfnpz_dr(wavefn,cnk_f,drcnk,cnk, &
+                                    Rl,cart,tau, &
+                                    kkx,kky,kkz,vcell,step, &
+                                    kxyz, &
+                                    ngrid,myproc,proj_flag,idr,lproj,nkpt,reduced, &
+                                    syms)
+
+        use all_to_all_module
+        use symmetry_module
+
+        implicit none
+m4_ifdef([MPI],[
+      include 'mpif.h'
+])
+
+	double complex:: wavefn(nkpt)
+        double complex::cnk(5),drcnk(5,3),cnk_f(5,48)
+        double precision::Rl(ngrid),cart(3,3),tau(3)
+        double precision::kkx,kky,kkz,vcell,step
+
+        integer::kxyz(3,nkpt)
+	integer::ngrid,myproc,proj_flag,idr,lproj, nkpt
+
+        logical::reduced
+
+        type(symmetry),intent(in):: syms
+
+!-------------------------------------------------------------------------
+
+	integer ii,jj,kk,ll,ierr,im,ix,twolp1,lp1,ifrac
+	double precision r1,r2,r3,r4,r5,r6,r7,r8,k10,k20,k30,ekin0
+	double precision k1,k2,k3,kx,ky,kz,kgr
+        double precision ekin,const21,const22,const23,const11,const12,const0
+        double precision SBESSJ,kgdotr0,scale,norm,step2,gdotts
+	double complex::  phase,ione,itwo,ctem1,ctem4,ctem11(3)
+
+        double complex, allocatable::Rlm_sum(:)
+        double complex, allocatable::Rlm2(:,:),drRlm(:,:,:),drRlm2(:,:,:)
+        double complex, allocatable::Rlmf(:,:,:),Rlm2f(:,:,:)
+        double complex, allocatable::ctem2(:),ctem3(:),ctemf(:),ctem22(:,:)
+        double complex, allocatable::Rlm(:,:),ylm(:)
+
+
+!-------------------------------------------------------------
+
+
+        twolp1=2*lproj+1
+        lp1=lproj+1
+        ifrac=0
+        if(syms%nfrac.ne.0) then
+          ifrac=1
+          allocate(Rlmf(ngrid,twolp1,syms%nfrac))
+          allocate(Rlm2f(ngrid,twolp1,syms%nfrac))
+          allocate(ctemf(ngrid))
+          allocate(ctem3(ngrid))
+          Rlmf(:,:)=(0.d0,0.d0)
+          cnk_f=(0.d0,0.d0) 
+        end if
+
+        ione=cmplx(0.d0,1.d0,kind=8)
+        itwo=cmplx(0.d0,2.d0,kind=8)
+      
+        const21=dsqrt(15.d0/(8.d0*pi4))
+        const22=dsqrt(15.d0/(2.d0*pi4))
+        const23=dsqrt(5.d0/(4.d0*pi4))
+
+        const12=dsqrt(3.d0/(2.d0*pi4))
+        const11=dsqrt(3.d0/(pi4))
+
+        const0=1.d0/dsqrt(pi4)
+        allocate(ylm(twolp1))
+
+        ylm(1)=const0
+
+!============================================================================
+
+        allocate(ctem2(ngrid))
+         
+        step2=step*step
+        allocate(Rlm2(ngrid,twolp1))
+        allocate(Rlm(ngrid,twolp1))
+
+        if(idr.eq.1) then
+        allocate(ctem22(ngrid,3))
+        allocate(drRlm(ngrid,twolp1,3))
+        allocate(drRlm2(ngrid,twolp1,3))
+        drRlm=(0.d0,0.d0)
+        drcnk=(0.d0,0.d0)
+        end if
+       
+        Rlm(:,:)=(0.d0,0.d0)
+
+! sum over G points
+
+! Rlm(r)=4\pi i^l e(ikr_0)\sum_G C^k(G) e(iGr_0) j_l(|k+G|r)Y_lm(\Omega_{k+G})
+!
+! where k is the wavevector in BZ, r_0 is the position of the atom of interest.
+!  
+
+      k10 = cart(1,1)*kkx+cart(1,2)*kky+cart(1,3)*kkz
+      k20 = cart(2,1)*kkx+cart(2,2)*kky+cart(2,3)*kkz
+      k30 = cart(3,1)*kkx+cart(3,2)*kky+cart(3,3)*kkz
+
+
+      do jj=1,nkpt
+
+           k1=kxyz(1,jj)
+           k2=kxyz(2,jj)
+           k3=kxyz(3,jj)
+
+           kx = cart(1,1)*k1+cart(1,2)*k2+  &
+                cart(1,3)*k3+k10
+           ky = cart(2,1)*k1+cart(2,2)*k2+  &
+                cart(2,3)*k3+k20
+           kz = cart(3,1)*k1+cart(3,2)*k2+  &
+                cart(3,3)*k3+k30
+           
+           kgdotr0=(kx*tau(1)+ky*tau(2)+kz*tau(3))
+
+           ekin = kx*kx+ky*ky+kz*kz
+ 
+           if(lproj.ge.1) then
+           if(ekin.lt.(1.d-10)) then
+
+              do im=1,twolp1
+                 ylm(im)=(0.d0,0.d0)
+              end do
+
+           else
+             
+              if(lproj.eq.2) then
+              ylm(1)= const21*(kx*kx-ky*ky+itwo*kx*ky)/ekin       !Y2(-2)^*
+              ylm(2)= const22*(kx*kz+ione*ky*kz)/ekin             !Y2(-1)^*
+              ylm(3)= const23*(3.d0*kz*kz/ekin-1.d0)              !Y2(0)^*
+              ylm(4)= -DCONJG(ylm(2))                            !Y2(1)^*
+              ylm(5)= DCONJG(ylm(1))                             !Y2(2)^*
+              end if
+
+              if(lproj.eq.1) then
+              ylm(1)= const12*(kx+ione*ky)/dsqrt(ekin)        !Y1(-1)^*
+              ylm(2)= const11*kz/dsqrt(ekin)                  !Y1(0)^*
+              ylm(3)= -const12*(kx-ione*ky)/dsqrt(ekin)       !Y1(1)^*
+              end if
+
+          end if
+          end if
+         
+
+! loop over radial points
+
+          phase=exp(cmplx(0.0d0,kgdotr0,kind=8))
+          ctem1=phase*wavefn(jj)
+          ctem11(1)=ione*kx
+          ctem11(2)=ione*ky
+          ctem11(3)=ione*kz
+
+          ekin0=dsqrt(ekin)*step
+
+          do ii=1,ngrid
+             kgr=ekin0*ii
+             ctem2(ii)=ctem1*SBESSJ(lproj,kgr)
+
+             if(idr.eq.1) then
+             do ix=1,3
+             ctem22(ii,ix)=ctem11(ix)*ctem2(ii)
+             end do
+             end if
+
+          end do
+
+          do ii=1,ngrid
+
+             do im=1,twolp1
+                Rlm(ii,im)=Rlm(ii,im)+ctem2(ii)*ylm(im)
+
+                if(idr.eq.1) then
+                do ix=1,3
+                   drRlm(ii,im,ix)=drRlm(ii,im,ix)+ctem22(ii,ix)*ylm(im)
+                end do
+                end if
+
+             end do
+         
+
+          end do
+
+!----------------------------------------
+! for systems with fractional translations
+
+          if(ifrac.eq.1) then
+
+          do kk=1,syms%nfrac
+             gdotts=k1*syms%tnp(1,syms%indfrac(kk))+k2*syms%tnp(2,syms%indfrac(kk))+ &
+                    k3*syms%tnp(3,syms%indfrac(kk))
+             ctemf(kk)=exp(cmplx(0.0d0,gdotts,kind=8))
+          end do
+
+          do kk=1,syms%nfrac
+
+             ctem3(:)=ctem2(:)*ctemf(kk)
+
+          do ii=1,ngrid
+             do im=1,twolp1
+             Rlmf(ii,im,kk)=Rlmf(ii,im,kk)+ctem3(ii)*ylm(im)
+             end do
+          end do
+          end do
+
+          end if
+!----------------------------------------
+
+       end do
+
+
+! 4*pi is the Bessel-Fourier transform factor, vcell is the wavefunction
+! normalization fortor.
+!
+m4_ifdef([MPI],[
+
+        allocate(Rlm_sum(ngrid))
+
+        do jj=1,twolp1
+
+        call mpi_barrier(MPI_COMM_WORLD, ierr)
+        call MPI_REDUCE(Rlm(1,jj),Rlm_sum,ngrid,MPI_DOUBLE_COMPLEX,  &
+        MPI_SUM,0,MPI_COMM_WORLD,ierr)
+
+        if(myproc.eq.0) then
+        Rlm(1:ngrid,jj)=Rlm_sum(1:ngrid)
+        end if
+
+        end do
+
+
+        if (idr.eq.1) then
+        do ii=1,3
+        do jj=1,twolp1
+
+        call mpi_barrier(MPI_COMM_WORLD, ierr)
+        call MPI_REDUCE(drRlm(1,jj,ii),Rlm_sum,ngrid,MPI_DOUBLE_COMPLEX,  &
+         MPI_SUM,0,MPI_COMM_WORLD,ierr)
+
+        if(myproc.eq.0) then
+        drRlm(1:ngrid,jj,ii)=Rlm_sum(1:ngrid)
+        end if
+
+        end do
+        end do
+        end if
+
+
+! systems with fractional translations
+        if(ifrac.eq.1) then
+
+        do ii=1,syms%nfrac
+           do jj=1,twolp1
+              call mpi_barrier(MPI_COMM_WORLD, ierr)
+
+              call MPI_REDUCE(Rlmf(1,jj,ii),Rlm_sum,ngrid,MPI_DOUBLE_COMPLEX,  &
+                                 MPI_SUM,0,MPI_COMM_WORLD,ierr)
+
+
+           if(myproc.eq.0) then
+           Rlmf(1:ngrid,jj,ii)=Rlm_sum(1:ngrid)
+           end if
+
+           end do
+        end do
+        end if
+
+        deallocate(Rlm_sum)
+])
+       
+
+       if(myproc.eq.0) then
+
+       Rlm(:,:)=Rlm(:,:)*pi4/dsqrt(vcell)
+       if(idr.eq.1) drRlm=drRlm*pi4/dsqrt(vcell)
+       if(ifrac.eq.1) Rlmf(:,:,:)=Rlmf(:,:,:)*pi4/dsqrt(vcell)
+
+
+!---------------------------------------------------
+       if(proj_flag.eq.1) then
+
+       do kk=1,twolp1
+       do ii=1,ngrid
+          Rlm2(ii,kk)=Rl(ii)*Rlm(ii,kk)
+          if(idr.eq.1) then
+          do ix=1,3
+          drRlm2(ii,kk,ix)=Rl(ii)*drRlm(ii,kk,ix)
+          end do
+          end if
+       end do
+       end do
+
+
+       if(ifrac.eq.1) then
+
+         do jj=1,syms%nfrac
+         do kk=1,twolp1
+            do ii=1,ngrid
+               Rlm2f(ii,kk,jj)=Rl(ii)*Rlmf(ii,kk,jj)
+            end do
+         end do
+         end do
+
+       end if
+
+       else
+
+       do kk=1,twolp1
+       do ii=1,ngrid
+          Rlm2(ii,kk)=Rlm(ii,kk)*DCONJG(Rlm(ii,kk))
+          if(idr.eq.1) then
+          do ix=1,3
+          drRlm2(ii,kk,ix)=drRlm(ii,kk,ix)*DCONJG(drRlm(ii,kk,ix))
+          end do
+          end if
+       end do
+       end do
+
+       if(ifrac.eq.1) then
+         do jj=1,syms%nfrac
+         do kk=1,twolp1
+            do ii=1,ngrid
+               Rlm2f(ii,kk,jj)=Rlmf(ii,kk,jj)*DCONJG(Rlmf(ii,kk,jj))
+            end do
+         end do
+         end do
+       end if
+
+       end if
+
+
+!---------------------------------------------------
+
+! do integration in real space from the atomic position to cutoff r_C
+
+       cnk=(0.d0,0.d0)
+       drcnk=(0.d0,0.d0)
+
+       do kk=1,twolp1
+       do ii=1,ngrid-7,7
+          r1=ii*ii
+          r2=(ii+1)*(ii+1)
+          r3=(ii+2)*(ii+2)
+          r4=(ii+3)*(ii+3)
+          r5=(ii+4)*(ii+4)
+          r6=(ii+5)*(ii+5)
+          r7=(ii+6)*(ii+6)
+          r8=(ii+7)*(ii+7)
+
+          cnk(kk)=cnk(kk)+    &
+          751.d0*(r1*Rlm2(ii,kk)+ r8*Rlm2(ii+7,kk))+    &
+          3577.d0*(r2*Rlm2(ii+1,kk)+r7*Rlm2(ii+6,kk))+    &
+          1323.d0*(r3*Rlm2(ii+2,kk)+r6*Rlm2(ii+5,kk))+    &
+          2989.d0*(r4*Rlm2(ii+3,kk)+r5*Rlm2(ii+4,kk))
+
+          if(idr.eq.1) then
+          do jj=1,3
+          drcnk(kk,jj)=drcnk(kk,jj)+    &
+          751.d0*(r1* drRlm2(ii,kk,jj)+ r8*drRlm2(ii+7,kk,jj))+    &
+          3577.d0*(r2*drRlm2(ii+1,kk,jj)+r7*drRlm2(ii+6,kk,jj))+    &
+          1323.d0*(r3*drRlm2(ii+2,kk,jj)+r6*drRlm2(ii+5,kk,jj))+    &
+          2989.d0*(r4*drRlm2(ii+3,kk,jj)+r5*drRlm2(ii+4,kk,jj))
+          end do
+          end if
+
+       end do
+       end do
+
+       if(ifrac.eq.1) then
+
+       cnk_f=(0.d0,0.d0)
+
+       do jj=1,syms%nfrac
+
+       do kk=1,twolp1
+       do ii=1,ngrid-7,7
+          r1=ii*ii
+          r2=(ii+1)*(ii+1)
+          r3=(ii+2)*(ii+2)
+          r4=(ii+3)*(ii+3)
+          r5=(ii+4)*(ii+4)
+          r6=(ii+5)*(ii+5)
+          r7=(ii+6)*(ii+6)
+          r8=(ii+7)*(ii+7)
+
+          cnk_f(kk,jj)=cnk_f(kk,jj)+    &
+          751.d0*(r1*Rlm2f(ii,kk,jj)+ r8*Rlm2f(ii+7,kk,jj))+    &
+          3577.d0*(r2*Rlm2f(ii+1,kk,jj)+r7*Rlm2f(ii+6,kk,jj))+    &
+          1323.d0*(r3*Rlm2f(ii+2,kk,jj)+r6*Rlm2f(ii+5,kk,jj))+    &
+          2989.d0*(r4*Rlm2f(ii+3,kk,jj)+r5*Rlm2f(ii+4,kk,jj))
+       end do
+       end do
+       end do
+       end if
+
+      scale=step*step2*(7.d0/17280.d0)
+
+      cnk=cnk*scale
+
+
+      if(idr.eq.1) drcnk=drcnk*scale
+
+      if(ifrac.eq.1) cnk_f=cnk_f*scale
+
+      if(proj_flag.ne.1) then
+         cnk=sqrt(cnk)
+         if(idr.eq.1) drcnk=sqrt(drcnk)
+         if(ifrac.eq.1) cnk_f=sqrt(cnk_f)
+      end if
+
+      end if  ! if myproc.eq.0
+
+! now broadcast
+m4_ifdef([MPI],[
+
+      call mpi_barrier(MPI_COMM_WORLD, ierr)
+      call mpi_bcast(cnk,twolp1,MPI_DOUBLE_COMPLEX,0,MPI_COMM_WORLD,ierr)
+      if(idr.eq.1) call mpi_bcast(drcnk,15,MPI_DOUBLE_COMPLEX,0,MPI_COMM_WORLD,ierr)
+      if(ifrac.eq.1) call mpi_bcast(cnk_f,240,MPI_DOUBLE_COMPLEX,0,MPI_COMM_WORLD,ierr)
+])
+        
+      deallocate(Rlm2)
+      deallocate(Rlm)
+      deallocate(ctem2)
+      if(idr.eq.1) then
+      deallocate(drRlm2)
+      deallocate(drRlm)
+      deallocate(ctem22)
+      end if
+
+      if(ifrac.eq.1) then
+        deallocate(Rlmf)
+        deallocate(Rlm2f)
+        deallocate(ctem3)
+        deallocate(ctemf)
+      end if
+
+      deallocate(ylm)
+
+      return
+      end
+
+
+!-------------------------------------------------------------------------
+        subroutine angular_wfnpz_p(wavefn,nkpt,kxyz,tau,rc,cart,  &
+                          kkx,kky,kkz,vcell,myproc,ngrid,step,Rl,cnk, &
+                          cnk_f, Rlm,proj_flag,syms,reduced)
+
+        use all_to_all_module
+        use symmetry_module
+
+        implicit none
+m4_ifdef([MPI],[
+      include 'mpif.h'
+])
+
+	integer ii,jj,kk,ll,ngrid,ierr,myproc,proj_flag,ifrac,im
+        integer nkpt,kxyz(3,nkpt)
+        logical::reduced
+        double precision tau(3),rc,kkx,kky,kkz,cart(3,3),vcell,Rl(ngrid)
+	complex (kind=8) wavefn(nkpt)
+        double complex::Rlm(ngrid,3)
+
+	double precision k1,k2,k3,kx,ky,kz,kgr
+
+        double complex::cnk(5),cnk_f(5,48)
+
+	double precision r1,r2,r3,r4,r5,r6,r7,r8,k10,k20,k30,ekin0
+        double precision ekin,const0,const1
+        double precision SBESSJ,kgdotr0,scale,step,norm,step2,gdotts
+	double complex::  phase,ylm(3),ione,itwo,ctem1
+
+        double complex, allocatable::Rlm_sum(:,:)
+        double complex, allocatable::Rlm2(:,:)
+        double complex, allocatable::Rlmf(:,:,:),Rlm2f(:,:,:)
+        double complex, allocatable::ctem2(:),ctem3(:),ctemf(:)
+
+        type(symmetry),intent(in):: syms
+
+
+        ifrac=0
+        if(syms%nfrac.ne.0) then
+          ifrac=1
+          allocate(Rlmf(ngrid,3,syms%nfrac))
+          allocate(Rlm2f(ngrid,3,syms%nfrac))
+          allocate(ctemf(ngrid))
+          allocate(ctem3(ngrid))
+          Rlmf=(0.d0,0.d0)
+        end if
+
+        ione=cmplx(0.d0,1.d0,kind=8)
+        itwo=cmplx(0.d0,2.d0,kind=8)
+      
+
+        const1=dsqrt(3.d0/(2.d0*pi4))
+        const0=dsqrt(3.d0/(pi4))
+
+!============================================================================
+!
+       allocate(ctem2(ngrid))
+         
+       step2=step*step
+       allocate(Rlm2(ngrid,3))
+      
+       Rlm(:,:)=(0.d0,0.d0)
+
+! sum over G points
+
+! Rlm(r)=4\pi i^l e(ikr_0)\sum_G C^k(G) e(iGr_0) j_l(|k+G|r)Y_lm(\Omega_{k+G})
+!
+! where k is the wavevector in BZ, r_0 is the position of the atom of interest.
+!  
+
+
+           k10 = cart(1,1)*kkx+cart(1,2)*kky+cart(1,3)*kkz
+           k20 = cart(2,1)*kkx+cart(2,2)*kky+cart(2,3)*kkz
+           k30 = cart(3,1)*kkx+cart(3,2)*kky+cart(3,3)*kkz
+
+
+      do jj=1,nkpt
+
+           k1=kxyz(1,jj)
+           k2=kxyz(2,jj)
+           k3=kxyz(3,jj)
+
+           kx = cart(1,1)*k1+cart(1,2)*k2+  &
+                cart(1,3)*k3+k10
+           ky = cart(2,1)*k1+cart(2,2)*k2+  &
+                cart(2,3)*k3+k20
+           kz = cart(3,1)*k1+cart(3,2)*k2+  &
+                cart(3,3)*k3+k30
+           
+           kgdotr0=(kx*tau(1)+ky*tau(2)+kz*tau(3))
+
+           ekin = kx*kx+ky*ky+kz*kz
+ 
+           if(ekin.lt.(1.d-10)) then
+              ylm(1)=(0.d0,0.d0)
+              ylm(2)=(0.d0,0.d0)
+              ylm(3)=(0.d0,0.d0)
+           else
+!   <Ylm|Psi>=\int Ylm^*\Psi
+
+              ylm(1)= const1*(kx+ione*ky)/dsqrt(ekin)        !Y1(-1)^*
+              ylm(2)= const0*kz/dsqrt(ekin)                  !Y1(0)^*
+              ylm(3)= -const1*(kx-ione*ky)/dsqrt(ekin)       !Y1(1)^*
+
+          end if
+         
+
+! loop over radial points
+
+          phase=exp(cmplx(0.0d0,kgdotr0,kind=8))
+          ctem1=phase*wavefn(jj)
+          ekin0=dsqrt(ekin)*step
+
+          do ii=1,ngrid
+             kgr=ekin0*ii
+             ctem2(ii)=ctem1*SBESSJ(1,kgr)
+          end do
+
+          do ii=1,ngrid
+             Rlm(ii,1)=Rlm(ii,1)+ctem2(ii)*ylm(1)
+             Rlm(ii,2)=Rlm(ii,2)+ctem2(ii)*ylm(2)
+             Rlm(ii,3)=Rlm(ii,3)+ctem2(ii)*ylm(3)
+          end do
+
+!----------------------------------------
+! for systems with fractional translations
+
+          if(ifrac.eq.1) then
+
+          do kk=1,syms%nfrac
+             gdotts=k1*syms%tnp(1,syms%indfrac(kk))+k2*syms%tnp(2,syms%indfrac(kk))+ &
+                    k3*syms%tnp(3,syms%indfrac(kk))
+             ctemf(kk)=exp(cmplx(0.0d0,gdotts,kind=8))
+          end do
+
+          do kk=1,syms%nfrac
+
+             ctem3(:)=ctem2(:)*ctemf(kk)
+
+          do ii=1,ngrid
+             do im=1,3
+             Rlmf(ii,im,kk)=Rlmf(ii,im,kk)+ctem3(ii)*ylm(im)
+             end do
+          end do
+          end do
+
+          end if
+!----------------------------------------
+
+       end do
+
+! 4*pi is the Bessel-Fourier transform factor, vcell is the wavefunction
+! normalization fortor.
+!
+m4_ifdef([MPI],[
+       allocate(Rlm_sum(ngrid,3))
+        Rlm_sum(:,:)=(0.d0,0.d0)
+        do jj=1,3
+        call MPI_ALLREDUCE(Rlm(1,jj),Rlm_sum(1,jj),ngrid,MPI_DOUBLE_COMPLEX,  &
+         MPI_SUM,MPI_COMM_WORLD,ierr)
+        end do
+        Rlm(:,1:3)=Rlm_sum(:,1:3)
+
+! systems with fractional translations
+        if(ifrac.eq.1) then
+
+        do ii=1,syms%nfrac
+           Rlm_sum(:,:)=(0.d0,0.d0)
+           do jj=1,3
+              call MPI_ALLREDUCE(Rlmf(1,jj,ii),Rlm_sum(1,jj),ngrid,MPI_DOUBLE_COMPLEX,  &
+                                 MPI_SUM,MPI_COMM_WORLD,ierr)
+           end do
+           Rlmf(:,:,ii)=Rlm_sum(:,:)
+        end do
+        end if
+
+        deallocate(Rlm_sum)
+])
+       
+       Rlm(:,1:3)=Rlm(:,1:3)*pi4/dsqrt(vcell)
+       if(ifrac.eq.1) Rlmf(:,:,:)=Rlmf(:,:,:)*pi4/dsqrt(vcell)
+
+!---------------------------------------------------
+       if(proj_flag.eq.1) then
+
+       do kk=1,3
+       do ii=1,ngrid
+          Rlm2(ii,kk)=Rl(ii)*Rlm(ii,kk)
+       end do
+       end do
+
+
+       if(ifrac.eq.1) then
+
+         do jj=1,syms%nfrac
+         do kk=1,3
+            do ii=1,ngrid
+               Rlm2f(ii,kk,jj)=Rl(ii)*Rlmf(ii,kk,jj)
+            end do
+         end do
+         end do
+
+       end if
+
+       else
+
+       do kk=1,3
+       do ii=1,ngrid
+          Rlm2(ii,kk)=Rlm(ii,kk)*DCONJG(Rlm(ii,kk))
+       end do
+       end do
+
+       if(ifrac.eq.1) then
+         do jj=1,syms%nfrac
+         do kk=1,3
+            do ii=1,ngrid
+               Rlm2f(ii,kk,jj)=Rlmf(ii,kk,jj)*DCONJG(Rlmf(ii,kk,jj))
+            end do
+         end do
+         end do
+       end if
+
+       end if
+
+!---------------------------------------------------
+
+! do integration in real space from the atomic position to cutoff r_C
+
+       cnk=(0.d0,0.d0)
+
+       do kk=1,3
+       do ii=1,ngrid-7,7
+          r1=ii*ii
+          r2=(ii+1)*(ii+1)
+          r3=(ii+2)*(ii+2)
+          r4=(ii+3)*(ii+3)
+          r5=(ii+4)*(ii+4)
+          r6=(ii+5)*(ii+5)
+          r7=(ii+6)*(ii+6)
+          r8=(ii+7)*(ii+7)
+
+          cnk(kk)=cnk(kk)+    &
+          751.d0*(r1*Rlm2(ii,kk)+ r8*Rlm2(ii+7,kk))+    &
+          3577.d0*(r2*Rlm2(ii+1,kk)+r7*Rlm2(ii+6,kk))+    &
+          1323.d0*(r3*Rlm2(ii+2,kk)+r6*Rlm2(ii+5,kk))+    &
+          2989.d0*(r4*Rlm2(ii+3,kk)+r5*Rlm2(ii+4,kk))
+       end do
+       end do
+
+       if(ifrac.eq.1) then
+
+       cnk_f=(0.d0,0.d0)
+
+       do jj=1,syms%nfrac
+
+       do kk=1,3
+       do ii=1,ngrid-7,7
+          r1=ii*ii
+          r2=(ii+1)*(ii+1)
+          r3=(ii+2)*(ii+2)
+          r4=(ii+3)*(ii+3)
+          r5=(ii+4)*(ii+4)
+          r6=(ii+5)*(ii+5)
+          r7=(ii+6)*(ii+6)
+          r8=(ii+7)*(ii+7)
+
+          cnk_f(kk,jj)=cnk_f(kk,jj)+    &
+          751.d0*(r1*Rlm2f(ii,kk,jj)+ r8*Rlm2f(ii+7,kk,jj))+    &
+          3577.d0*(r2*Rlm2f(ii+1,kk,jj)+r7*Rlm2f(ii+6,kk,jj))+    &
+          1323.d0*(r3*Rlm2f(ii+2,kk,jj)+r6*Rlm2f(ii+5,kk,jj))+    &
+          2989.d0*(r4*Rlm2f(ii+3,kk,jj)+r5*Rlm2f(ii+4,kk,jj))
+       end do
+       end do
+       end do
+       end if
+
+      scale=step*step2*(7.d0/17280.d0)
+
+      cnk=cnk*scale
+
+      if(ifrac.eq.1) cnk_f=cnk_f*scale
+
+      if(proj_flag.ne.1) then
+         cnk=sqrt(cnk)
+         if(ifrac.eq.1) cnk_f=sqrt(cnk_f)
+      end if
+        
+      deallocate(Rlm2)
+      deallocate(ctem2)
+
+      if(ifrac.eq.1) then
+        deallocate(Rlmf)
+        deallocate(Rlm2f)
+        deallocate(ctem3)
+        deallocate(ctemf)
+      end if
+
+
+      return
+      end
+
+
+!-------------------------------------------------------------------------
+        subroutine angular_wfnpz_pdr(wavefn,nkpt,kxyz,tau,rc,cart,  &
+                          kkx,kky,kkz,vcell,myproc,ngrid,step,Rl,cnk, &
+                          drcnk,cnk_f, Rlm,proj_flag,syms,reduced,idr)
+
+        use all_to_all_module
+        use symmetry_module
+
+        implicit none
+m4_ifdef([MPI],[
+      include 'mpif.h'
+])
+
+	integer ii,jj,kk,ll,ngrid,ierr,myproc,proj_flag,ifrac,ix,idr,im
+        integer nkpt,kxyz(3,nkpt)
+        logical::reduced
+        double precision tau(3),rc,kkx,kky,kkz,cart(3,3),vcell,Rl(ngrid)
+	complex (kind=8) wavefn(nkpt)
+        double complex::Rlm(ngrid,3)
+
+	double precision k1,k2,k3,kx,ky,kz,kgr
+
+        double complex::cnk(5),cnk_f(5,48),drcnk(5,3)
+
+	double precision r1,r2,r3,r4,r5,r6,r7,r8,k10,k20,k30,ekin0
+        double precision ekin,const0,const1
+        double precision SBESSJ,kgdotr0,scale,step,norm,step2,gdotts
+	double complex::  phase,ylm(3),ione,itwo,ctem1,ctem11(3),ctem4
+
+        double complex, allocatable::Rlm_sum(:,:)
+        double complex, allocatable::Rlm2(:,:),drRlm(:,:,:),drRlm2(:,:,:)
+        double complex, allocatable::Rlmf(:,:,:),Rlm2f(:,:,:)
+        double complex, allocatable::ctem2(:),ctem3(:),ctemf(:),ctem22(:,:)
+
+        type(symmetry),intent(in):: syms
+
+
+        ifrac=0
+        if(syms%nfrac.ne.0) then
+          ifrac=1
+          allocate(Rlmf(ngrid,3,syms%nfrac))
+          allocate(Rlm2f(ngrid,3,syms%nfrac))
+          allocate(ctemf(ngrid))
+          allocate(ctem3(ngrid))
+          Rlmf=(0.d0,0.d0)
+        end if
+
+        ione=cmplx(0.d0,1.d0,kind=8)
+        itwo=cmplx(0.d0,2.d0,kind=8)
+      
+
+        const1=dsqrt(3.d0/(2.d0*pi4))
+        const0=dsqrt(3.d0/(pi4))
+        step2=step*step
+
+!============================================================================
+!
+       allocate(ctem2(ngrid))
+
+       if(idr.eq.1) then
+       allocate(ctem22(ngrid,3))
+       allocate(drRlm(ngrid,3,3))
+       allocate(drRlm2(ngrid,3,3))
+       drRlm=(0.d0,0.d0)
+       end if
+
+         
+       allocate(Rlm2(ngrid,3))
+      
+       Rlm(:,:)=(0.d0,0.d0)
+
+! sum over G points
+
+! Rlm(r)=4\pi i^l e(ikr_0)\sum_G C^k(G) e(iGr_0) j_l(|k+G|r)Y_lm(\Omega_{k+G})
+!
+! where k is the wavevector in BZ, r_0 is the position of the atom of interest.
+!  
+
+
+           k10 = cart(1,1)*kkx+cart(1,2)*kky+cart(1,3)*kkz
+           k20 = cart(2,1)*kkx+cart(2,2)*kky+cart(2,3)*kkz
+           k30 = cart(3,1)*kkx+cart(3,2)*kky+cart(3,3)*kkz
+
+
+      do jj=1,nkpt
+
+           k1=kxyz(1,jj)
+           k2=kxyz(2,jj)
+           k3=kxyz(3,jj)
+
+           kx = cart(1,1)*k1+cart(1,2)*k2+  &
+                cart(1,3)*k3+k10
+           ky = cart(2,1)*k1+cart(2,2)*k2+  &
+                cart(2,3)*k3+k20
+           kz = cart(3,1)*k1+cart(3,2)*k2+  &
+                cart(3,3)*k3+k30
+           
+           kgdotr0=(kx*tau(1)+ky*tau(2)+kz*tau(3))
+
+           ekin = kx*kx+ky*ky+kz*kz
+ 
+           if(ekin.lt.(1.d-10)) then
+              ylm(1)=(0.d0,0.d0)
+              ylm(2)=(0.d0,0.d0)
+              ylm(3)=(0.d0,0.d0)
+           else
+
+!   <Ylm|Psi>=\int Ylm^*\Psi
+
+              ylm(1)= const1*(kx+ione*ky)/dsqrt(ekin)        !Y1(-1)^*
+              ylm(2)= const0*kz/dsqrt(ekin)                  !Y1(0)^*
+              ylm(3)= -const1*(kx-ione*ky)/dsqrt(ekin)       !Y1(1)^*
+
+          end if
+         
+
+! loop over radial points
+
+          phase=exp(cmplx(0.0d0,kgdotr0,kind=8))
+          ctem1=phase*wavefn(jj)
+          ctem11(1)=ione*kx
+          ctem11(2)=ione*ky
+          ctem11(3)=ione*kz
+
+          ekin0=dsqrt(ekin)*step
+
+          do ii=1,ngrid
+             kgr=ekin0*ii
+             ctem2(ii)=ctem1*SBESSJ(1,kgr)
+
+             if(idr.eq.1) then
+             do ix=1,3
+             ctem22(ii,ix)=ctem11(ix)*ctem2(ii)
+             end do
+             end if
+
+          end do
+
+          do ii=1,ngrid
+             do im=1,3
+             Rlm(ii,im)=Rlm(ii,im)+ctem2(ii)*ylm(im)
+
+             if(idr.eq.1) then
+             do ix=1,3
+                drRlm(ii,im,ix)=drRlm(ii,im,ix)+ctem22(ii,ix)*ylm(im)
+             end do
+             end if
+
+             end do
+
+          end do
+
+!----------------------------------------
+! for systems with fractional translations
+
+          if(ifrac.eq.1) then
+
+          do kk=1,syms%nfrac
+             gdotts=k1*syms%tnp(1,syms%indfrac(kk))+k2*syms%tnp(2,syms%indfrac(kk))+ &
+                    k3*syms%tnp(3,syms%indfrac(kk))
+             ctemf(kk)=exp(cmplx(0.0d0,gdotts,kind=8))
+          end do
+
+          do kk=1,syms%nfrac
+
+             ctem3(:)=ctem2(:)*ctemf(kk)
+
+          do ii=1,ngrid
+             do im=1,3
+             Rlmf(ii,im,kk)=Rlmf(ii,im,kk)+ctem3(ii)*ylm(im)
+             end do
+          end do
+          end do
+
+          end if
+!----------------------------------------
+
+       end do
+
+! 4*pi is the Bessel-Fourier transform factor, vcell is the wavefunction
+! normalization fortor.
+!
+m4_ifdef([MPI],[
+       allocate(Rlm_sum(ngrid,3))
+        Rlm_sum(:,:)=(0.d0,0.d0)
+        do jj=1,3
+        call MPI_ALLREDUCE(Rlm(1,jj),Rlm_sum(1,jj),ngrid,MPI_DOUBLE_COMPLEX,  &
+         MPI_SUM,MPI_COMM_WORLD,ierr)
+        end do
+        Rlm(:,1:3)=Rlm_sum(:,1:3)
+
+        if (idr.eq.1) then
+        do ii=1,3
+        Rlm_sum(:,:)=(0.d0,0.d0)
+        do jj=1,3
+        call MPI_ALLREDUCE(drRlm(1,jj,ii),Rlm_sum(1,jj),ngrid,MPI_DOUBLE_COMPLEX,  &
+         MPI_SUM,MPI_COMM_WORLD,ierr)
+        end do
+        drRlm(:,:,ii)=Rlm_sum(:,:)
+        end do
+        end if
+
+
+! systems with fractional translations
+        if(ifrac.eq.1) then
+
+        do ii=1,syms%nfrac
+           Rlm_sum(:,:)=(0.d0,0.d0)
+           do jj=1,3
+              call MPI_ALLREDUCE(Rlmf(1,jj,ii),Rlm_sum(1,jj),ngrid,MPI_DOUBLE_COMPLEX,  &
+                                 MPI_SUM,MPI_COMM_WORLD,ierr)
+           end do
+           Rlmf(:,:,ii)=Rlm_sum(:,:)
+        end do
+        end if
+
+        deallocate(Rlm_sum)
+])
+       
+       Rlm(:,1:3)=Rlm(:,1:3)*pi4/dsqrt(vcell)
+       if(ifrac.eq.1) Rlmf(:,:,:)=Rlmf(:,:,:)*pi4/dsqrt(vcell)
+
+!---------------------------------------------------
+       if(proj_flag.eq.1) then
+
+       do kk=1,3
+       do ii=1,ngrid
+          Rlm2(ii,kk)=Rl(ii)*Rlm(ii,kk)
+       end do
+       end do
+
+
+       if(ifrac.eq.1) then
+
+       do jj=1,syms%nfrac
+       do kk=1,3
+
+          do ii=1,ngrid
+             Rlm2f(ii,kk,jj)=Rl(ii)*Rlmf(ii,kk,jj)
+          end do
+
+          if(idr.eq.1) then
+          do ix=1,3
+          drRlm2(ii,kk,ix)=Rl(ii)*drRlm(ii,kk,ix)
+          end do
+          end if
+
+       end do
+       end do
+
+       end if
+
+       else
+
+       do kk=1,3
+       do ii=1,ngrid
+          Rlm2(ii,kk)=Rlm(ii,kk)*DCONJG(Rlm(ii,kk))
+       end do
+       end do
+
+       if(ifrac.eq.1) then
+       do jj=1,syms%nfrac
+       do kk=1,3
+          do ii=1,ngrid
+             Rlm2f(ii,kk,jj)=Rlmf(ii,kk,jj)*DCONJG(Rlmf(ii,kk,jj))
+          end do
+
+          if(idr.eq.1) then
+          do ix=1,3
+          drRlm2(ii,kk,ix)=drRlm(ii,kk,ix)*DCONJG(drRlm(ii,kk,ix))
+          end do
+          end if
+
+       end do
+       end do
+       end if
+
+       end if
+
+!---------------------------------------------------
+
+! do integration in real space from the atomic position to cutoff r_C
+
+       cnk=(0.d0,0.d0)
+
+       do kk=1,3
+       do ii=1,ngrid-7,7
+          r1=ii*ii
+          r2=(ii+1)*(ii+1)
+          r3=(ii+2)*(ii+2)
+          r4=(ii+3)*(ii+3)
+          r5=(ii+4)*(ii+4)
+          r6=(ii+5)*(ii+5)
+          r7=(ii+6)*(ii+6)
+          r8=(ii+7)*(ii+7)
+
+          cnk(kk)=cnk(kk)+    &
+          751.d0*(r1*Rlm2(ii,kk)+ r8*Rlm2(ii+7,kk))+    &
+          3577.d0*(r2*Rlm2(ii+1,kk)+r7*Rlm2(ii+6,kk))+    &
+          1323.d0*(r3*Rlm2(ii+2,kk)+r6*Rlm2(ii+5,kk))+    &
+          2989.d0*(r4*Rlm2(ii+3,kk)+r5*Rlm2(ii+4,kk))
+
+          if(idr.eq.1) then
+          do jj=1,3
+          drcnk(kk,jj)=drcnk(kk,jj)+    &
+          751.d0*(r1* drRlm2(ii,kk,jj)+ r8*drRlm2(ii+7,kk,jj))+    &
+          3577.d0*(r2*drRlm2(ii+1,kk,jj)+r7*drRlm2(ii+6,kk,jj))+    &
+          1323.d0*(r3*drRlm2(ii+2,kk,jj)+r6*drRlm2(ii+5,kk,jj))+    &
+          2989.d0*(r4*drRlm2(ii+3,kk,jj)+r5*drRlm2(ii+4,kk,jj))
+          end do
+          end if
+       end do
+       end do
+
+       if(ifrac.eq.1) then
+
+       cnk_f=(0.d0,0.d0)
+
+       do jj=1,syms%nfrac
+
+       do kk=1,3
+       do ii=1,ngrid-7,7
+          r1=ii*ii
+          r2=(ii+1)*(ii+1)
+          r3=(ii+2)*(ii+2)
+          r4=(ii+3)*(ii+3)
+          r5=(ii+4)*(ii+4)
+          r6=(ii+5)*(ii+5)
+          r7=(ii+6)*(ii+6)
+          r8=(ii+7)*(ii+7)
+
+          cnk_f(kk,jj)=cnk_f(kk,jj)+    &
+          751.d0*(r1*Rlm2f(ii,kk,jj)+ r8*Rlm2f(ii+7,kk,jj))+    &
+          3577.d0*(r2*Rlm2f(ii+1,kk,jj)+r7*Rlm2f(ii+6,kk,jj))+    &
+          1323.d0*(r3*Rlm2f(ii+2,kk,jj)+r6*Rlm2f(ii+5,kk,jj))+    &
+          2989.d0*(r4*Rlm2f(ii+3,kk,jj)+r5*Rlm2f(ii+4,kk,jj))
+
+
+
+       end do
+       end do
+       end do
+       end if
+
+      scale=step*step2*(7.d0/17280.d0)
+
+      cnk=cnk*scale
+      if(idr.eq.1) drcnk=drcnk*scale
+
+      if(ifrac.eq.1) cnk_f=cnk_f*scale
+
+      if(proj_flag.ne.1) then
+         cnk=sqrt(cnk)
+         if(idr.eq.1) drcnk=sqrt(drcnk)
+
+         if(ifrac.eq.1) cnk_f=sqrt(cnk_f)
+      end if
+        
+      deallocate(Rlm2)
+      deallocate(ctem2)
+
+      if(ifrac.eq.1) then
+        deallocate(Rlmf)
+        deallocate(Rlm2f)
+        deallocate(ctem3)
+        deallocate(ctemf)
+      end if
+
+      if(ifrac.eq.1) then
+        deallocate(Rlmf)
+        deallocate(Rlm2f)
+        deallocate(ctem3)
+        deallocate(ctemf)
+      end if
+
+
+      return
+      end
+
+
+!-------------------------------------------------------------------------
+        subroutine angular_wfnpz_s(wavefn,nkpt,kxyz,tau,rc,cart,  &
+                          kkx,kky,kkz,vcell,myproc,ngrid,step,Rl,cnk,Rlm,proj_flag)
+
+
+        use all_to_all_module
+        implicit none
+m4_ifdef([MPI],[
+      include 'mpif.h'
+])
+
+	integer ii,jj,kk,ll,ngrid,ierr,myproc,proj_flag
+        integer nkpt,kxyz(3,nkpt)
+        double precision tau(3),rc,kkx,kky,kkz,cart(3,3),vcell,Rl(ngrid)
+	complex (kind=8) wavefn(nkpt)
+        double complex::Rlm(ngrid,1)
+
+	double precision k1,k2,k3,kgr,kgr0,k10,k20,k30,ekin0
+
+        double complex::cnk(1)
+
+	double precision r1,r2,r3,r4,r5,r6,r7,r8
+        double precision ekin,const1,const0
+        double precision SBESSJ,kgdotr0,scale,step,norm,step2
+	double complex::  phase,ylm(1),ione,ctem1,ctem2
+
+!        double complex, allocatable::Rlm(:,:),Rlm_sum(:,:)
+        double complex, allocatable::Rlm_sum(:,:)
+        double complex, allocatable::Rlm2(:,:)
+
+        ione=(0.d0,1.d0)
+      
+       const0=1.d0/dsqrt(pi4)
+
+
+
+!============================================================================
+!
+         
+       step2=step*step
+       allocate(Rlm2(ngrid,1))
+      
+       Rlm(:,:)=(0.d0,0.d0)
+
+! sum over G points
+
+! Rlm(r)=4\pi i^l e(ikr_0)\sum_G C^k(G) e(iGr_0) j_l(|k+G|r)Y_lm(\Omega_{k+G})
+!
+! where k is the wavevector in BZ, r_0 is the position of the atom of interest.
+!  
+
+           k10 = cart(1,1)*kkx+cart(1,2)*kky+cart(1,3)*kkz
+           k20 = cart(2,1)*kkx+cart(2,2)*kky+cart(2,3)*kkz
+           k30 = cart(3,1)*kkx+cart(3,2)*kky+cart(3,3)*kkz
+           ylm(1)=const0
+
+      do jj=1,nkpt
+
+           k1 = cart(1,1)*kxyz(1,jj)+cart(1,2)*kxyz(2,jj)+  &
+                cart(1,3)*kxyz(3,jj)+k10
+           k2 = cart(2,1)*kxyz(1,jj)+cart(2,2)*kxyz(2,jj)+  &
+                cart(2,3)*kxyz(3,jj)+k20
+           k3 = cart(3,1)*kxyz(1,jj)+cart(3,2)*kxyz(2,jj)+  &
+                cart(3,3)*kxyz(3,jj)+k30
+
+           kgdotr0=(k1*tau(1)+k2*tau(2)+k3*tau(3))
+
+           ekin0 = dsqrt(k1*k1+k2*k2+k3*k3)*step
+
+! loop over radial points
+
+          phase=exp(cmplx(0.0d0,kgdotr0,kind=8))
+          ctem1=phase*wavefn(jj)
+
+          do ii=1,ngrid
+              kgr=ekin0*ii
+
+
+              ctem2=ctem1*SBESSJ(0,kgr)
+
+              Rlm(ii,1)=Rlm(ii,1)+ctem2*ylm(1)
+
+          end do
+
+       end do
+
+!
+! 4*pi is the Bessel-Fourier transform factor, vcell is the wavefunction
+! normalization fortor.
+!
+m4_ifdef([MPI],[
+       allocate(Rlm_sum(ngrid,1))
+       Rlm_sum(:,:)=(0.d0,0.d0)
+       jj=1
+       call MPI_ALLREDUCE(Rlm(1,jj),Rlm_sum(1,jj),ngrid,MPI_DOUBLE_COMPLEX,  &
+        MPI_SUM,MPI_COMM_WORLD,ierr)
+       Rlm(:,:)=Rlm_sum(:,:)
+       deallocate(Rlm_sum)
+])
+       
+       Rlm(:,:)=Rlm(:,:)*pi4/dsqrt(vcell)
+
+       kk=1
+       if(proj_flag.eq.1) then
+       do ii=1,ngrid
+          Rlm2(ii,kk)=Rl(ii)*Rlm(ii,kk)
+       end do
+       else
+       do ii=1,ngrid
+          Rlm2(ii,kk)=Rlm(ii,kk)*DCONJG(Rlm(ii,kk))
+       end do
+       end if
+
+
+! do integration in real space from the atomic position to cutoff r_C
+
+       cnk=(0.d0,0.d0)
+
+       kk=1
+       do ii=1,ngrid-7,7
+          r1=ii*ii
+          r2=(ii+1)*(ii+1) 
+          r3=(ii+2)*(ii+2) 
+          r4=(ii+3)*(ii+3) 
+          r5=(ii+4)*(ii+4) 
+          r6=(ii+5)*(ii+5) 
+          r7=(ii+6)*(ii+6) 
+          r8=(ii+7)*(ii+7) 
+
+          cnk(kk)=cnk(kk)+    &
+          751*(r1*Rlm2(ii,kk)+ r8*Rlm2(ii+7,kk))+    &
+          3577*(r2*Rlm2(ii+1,kk)+r7*Rlm2(ii+6,kk))+    &
+          1323*(r3*Rlm2(ii+2,kk)+r6*Rlm2(ii+5,kk))+    &
+          2989*(r4*Rlm2(ii+3,kk)+r5*Rlm2(ii+4,kk))
+       end do
+
+      scale=step*step2*(7.d0/17280.d0)
+
+      cnk=cnk*scale
+
+
+! uncomment the following line if use decomposition scheme
+! \int |<Ylm|Psi>|^2
+! if use
+! \int <Ylm*Rl|Psi>
+! then do not do sqrt.
+!
+
+      if(proj_flag.ne.1) cnk(:)=sqrt(cnk(:))
+        
+      deallocate(Rlm2)
+ 
+
+      return
+      end
+
+
+
+       REAL*8 FUNCTION SBESSJ(N,X)
+       IMPLICIT REAL*8 (A-H,O-Z)
+!
+!
+!
+       PARAMETER(ONE=1.0d0,TWO=2.0d0,THREE=3.0d0,ZERO=0.0d0)
+       PARAMETER(FIVE = 5.0d0,TEN = 10.0d0,FOURTN = 14.0d0)
+!
+!
+!      SPHERICAL BESSEL FUNCTION OF THE FIRST KIND
+!
+       IF(ABS(X) .GT. 0.001) THEN
+         SB0 = SIN(X)/X
+       ELSE
+         X2 = X*X/TWO
+         SB0 = ONE - (X2/THREE)*(ONE - X2/TEN)
+       ENDIF
+       IF(N .EQ. 0) THEN
+         SBESSJ = SB0
+       ELSE
+         IF(ABS(X) .GT. 0.001) THEN
+           SB1 = (SIN(X)/X - COS(X)) / X
+         ELSE
+           X2 = X*X/TWO
+           SB1 = (X/THREE)*(ONE - (X2/FIVE)*(1.0d0 - X2/FOURTN))
+         ENDIF
+         IF(N .EQ. 1) THEN
+           SBESSJ = SB1
+         ELSEIF(X .EQ. ZERO) THEN
+           SBESSJ = ZERO
+         ELSE
+           BY = SB1
+           BYM = SB0
+           UX = ONE / X
+           DO 10 J=1,N-1
+             BYP = REAL(2*J+1)*UX*BY - BYM
+             BYM = BY
+             BY = BYP
+ 10        CONTINUE
+           SBESSJ = BY
+         ENDIF
+       ENDIF
+       RETURN
+       END
+
+

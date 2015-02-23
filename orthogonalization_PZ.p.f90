@@ -1,0 +1,218 @@
+! m4undef.m4
+!
+! resets various m4 commands to have a prefix m4_
+! this can be achieved using option -P but only on some architectures
+! any file to be preprocessed with m4 should use this set of macro definitions
+!
+! David Prendergast, June 6, 2006
+
+
+
+! fft_macros.m4
+!
+!     fft_aux_space(aux,naux,aux2,naux2,dec1,dec2)
+!     fft_local_init(N,A,LDA,LOT,DIREC)
+!     fft_perm_init(N,AUX)
+!
+!     fft_multiple_backward(N,A,LOTSTRIDE,LOT,LOOPDUMMY,VECOUT,OFFSET)
+!     fft_multiple_forward (N,A,LOTSTRIDE,LOT,LOOPDUMMY,VECOUT,OFFSET)
+!
+!     fft_backward(N,A,LOTSTRIDE)
+!     fft_forward (N,A,LOTSTRIDE)
+!
+!     fft_convol(N,A,B,POS)
+!
+!     fft_multiple_scale(N,A,LOTSTRIDE,LOT,LOOPDUMMY,SCALE)
+!
+!     timeget (t0)
+!     timediff(t1,t0)
+!
+!
+!     fft_fcblock     defines blocking factor for fast convolute
+!     fft_local_free  release memory
+!
+
+!
+
+
+subroutine  orthogonalization_PZ(pw_params, eval, neig, wavefn, k_gspace, crys)
+  !
+
+  include 'use.h'
+  use flibcalls_module
+  use all_to_all_module
+  implicit none             ! implicit? Just say no!
+  include 'interface.h'
+  include 'flibcalls.ph' 
+  include 'all_to_all.h'
+
+      include 'mpif.h'
+
+  !
+  !     --------------------  arguments ------------------------------------
+  !
+  !     INPUT:
+  !     -----
+  !
+  integer, intent(in) ::  neig     
+  type(pw_parameter), intent(in) :: pw_params 
+  type(parallel_gspace), intent(in) :: k_gspace
+  type(crystal), intent(in) ::  crys       
+  double complex::  wavefn(*)
+
+  real(dp), intent(in) ::  eval(neig)    
+
+  !
+  !
+  !     --------------------- local variables ------------------------------
+  !
+  integer :: len_g, ib,jb,ig,myproc,nproc,ig_start,ig_end,jg_start,jg_end,ierr
+  integer:: Ncluster,icluster,jcluster,kcluster,Ncluster_orth,mcluster_max
+  integer,allocatable::mcluster(:),icluster_orth(:),index_cluster(:,:)
+  double precision::delta_e,eng1,tol
+  double complex:: norm,norm_loc,overlap_loc,overlap_sum
+  double complex,allocatable::overlap(:,:,:)
+
+  myproc = k_gspace%myproc
+  nproc = k_gspace%nproc
+  delta_e=1.d-1   ! 0.1 Ry window, check orth
+  tol=1.d-10
+
+
+  len_g=k_gspace%length
+
+! identify clusters of eigenvectors
+  Ncluster=1
+  eng1=eval(1)
+  do ib=2,neig
+  if(abs(eng1-eval(ib)).ge.delta_e) then
+  Ncluster=Ncluster+1
+  eng1=eval(ib)
+  end if
+  end do
+
+  
+  allocate(mcluster(Ncluster))
+  allocate(icluster_orth(Ncluster))
+  icluster_orth(:)=0
+
+  mcluster(:)=0
+  Ncluster=1
+  mcluster(1)=1
+  eng1=eval(1)
+  do ib=2,neig
+  if(abs(eng1-eval(ib)).ge.delta_e) then
+  Ncluster=Ncluster+1
+  eng1=eval(ib)
+  mcluster(Ncluster)=1
+  else
+  mcluster(Ncluster)=mcluster(Ncluster)+1 
+  end if
+  end do
+
+  mcluster_max=MAXVAL(mcluster(:))
+
+  write(9,*) "Number of clusters, max cluster size",Ncluster,mcluster_max
+
+  allocate(index_cluster(mcluster_max,Ncluster))
+
+!  allocate(overlap(mcluster_max,mcluster_max,Ncluster))
+  overlap=(0.d0,0.d0)
+ 
+  ib=0
+  do icluster=1,Ncluster
+     do jcluster=1,mcluster(icluster)
+     ib=ib+1
+     index_cluster(jcluster,icluster)=ib
+!     write(9,*) ib,eval(ib),icluster,jcluster
+     end do
+  end do
+
+! calculate overlap, check orthogonalization
+
+  Ncluster_orth=0
+  ib=0
+  do icluster=1,Ncluster
+     do jcluster=1,mcluster(icluster)
+        ib=ib+1
+        ig_start=(ib-1)*len_g+1
+        ig_end=ib*len_g
+        do kcluster=jcluster,mcluster(icluster)
+           jb=ib+(kcluster-jcluster)
+        jg_start=(jb-1)*len_g+1
+        jg_end=jb*len_g
+  overlap_loc=DOT_PRODUCT(wavefn(ig_start:ig_end),wavefn(jg_start:jg_end))
+
+
+        call MPI_ALLREDUCE(overlap_loc,overlap_sum,1,MPI_DOUBLE_COMPLEX,  &
+        MPI_SUM,MPI_COMM_WORLD,ierr)
+!        overlap(kcluster,jcluster,icluster)=overlap_sum
+
+     if(ib.eq.jb) then
+       if(abs(overlap_sum-1.d0).ge.tol) then
+       if (myproc.eq.0) then
+       write(9,111) icluster, jcluster, kcluster,ib,jb,eval(ib),eval(jb)
+       write(9,*) "warning: overlap_sum",overlap_sum
+       end if
+       end if
+     else
+       if(abs(overlap_sum).ge.tol) then
+       if (myproc.eq.0) then
+       write(9,111) icluster, jcluster, kcluster,ib,jb,eval(ib),eval(jb)
+       write(9,*) "warning: overlap_sum",overlap_sum
+       end if
+       icluster_orth(icluster)=1
+       end if
+     end if
+
+
+ 111    format(5i10,2f16.10)
+     end do
+     end do
+  end do
+ 
+  
+! do modified Gram_Schmidt
+!
+  write(9,*) "Number of clusters to be reorthogonalized",SUM(icluster_orth)
+
+  do icluster=1,Ncluster
+     if(icluster_orth(icluster).eq.1) then
+     write(9,*) "perform orthogonalization for cluster",icluster,mcluster(icluster)
+     do jcluster=1,mcluster(icluster)
+        ib=index_cluster(jcluster,icluster)
+        ig_start=(ib-1)*len_g+1
+        ig_end=ib*len_g
+        do kcluster=1,jcluster-1
+        jb=index_cluster(kcluster,icluster)
+        jg_start=(jb-1)*len_g+1
+        jg_end=jb*len_g
+      
+  overlap_loc=DOT_PRODUCT(wavefn(jg_start:jg_end),wavefn(ig_start:ig_end))
+
+
+        call MPI_ALLREDUCE(overlap_loc,overlap_sum,1,MPI_DOUBLE_COMPLEX,  &
+        MPI_SUM,MPI_COMM_WORLD,ierr)
+
+     wavefn(ig_start:ig_end)= wavefn(ig_start:ig_end)-overlap_sum*wavefn(jg_start:jg_end)
+       end do
+
+! normalization
+  overlap_loc=DOT_PRODUCT(wavefn(ig_start:ig_end),wavefn(ig_start:ig_end))
+
+        call MPI_ALLREDUCE(overlap_loc,overlap_sum,1,MPI_DOUBLE_COMPLEX,  &
+        MPI_SUM,MPI_COMM_WORLD,ierr)
+
+     wavefn(ig_start:ig_end)= wavefn(ig_start:ig_end)/sqrt(real(overlap_sum))
+
+     end do
+     end if
+  end do
+
+  deallocate(mcluster)
+  deallocate(icluster_orth)
+  deallocate(index_cluster)
+
+  return
+  end subroutine 
+

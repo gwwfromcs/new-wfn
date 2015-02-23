@@ -1,0 +1,370 @@
+!-*-Fortran-*-
+!	
+!       Provide correct interfaces for the various libraries
+!
+!	Bernd, 1996	
+!
+!
+!
+!     ---------------------- LAPACK -------------------------------
+!
+
+interface mdnrm2
+m4_ifdef([CRAY],[
+  real(kind(1.d0)) function snrm2(n,x,incx)
+],[
+  real(kind(1.d0)) function dnrm2(n,x,incx)
+])
+    integer :: n,incx
+    real(kind(1.d0)) :: x
+  end function 
+
+end interface
+
+interface mdsyev
+m4_ifdef([CRAY],[	
+  subroutine ssyev(v, l, m, a1, n, a2, a3, k, i)
+],[
+  subroutine dsyev(v, l, m, a1, n, a2, a3, k, i)
+])
+    character :: v, l
+    real(kind(1.0d0)) :: a1
+    real(kind(1.0d0)):: a2, a3
+    integer :: m, n, k, i
+  end subroutine
+end interface
+
+ 
+interface mdspev
+m4_ifdef([CRAY],[	
+  subroutine sspev(v, l, m, a1, n, a2, a3, k, i)
+],[
+  subroutine dspev(v, l, m, a1, n, a2, a3, k, i)
+])
+    character :: v, l
+    complex(kind(1.0d0)) :: a1
+    real(kind(1.0d0)):: a2, a3
+    integer :: m, n, k, i
+  end subroutine 
+
+
+
+end interface 
+
+interface mzheev
+m4_ifdef([CRAY],[
+  subroutine cheev(jobz, uplo, n, a, lda, w, work, lwork, rwork, info)
+],[
+  subroutine zheev(jobz, uplo, n, a, lda, w, work, lwork, rwork, info)
+])
+      character :: jobz, uplo
+      integer :: info, lda, lwork, n
+      real(kind(1.0d0)) :: rwork, w
+      complex(kind(1.0d0)) :: a, work
+
+m4_ifdef([CRAY],[
+  end subroutine cheev
+],[
+  end subroutine zheev
+])
+
+
+end interface
+
+interface mzpotrf
+m4_ifdef([CRAY],[
+  subroutine CPOTRF(uplo,n ,a,lda,info )
+],[
+  subroutine ZPOTRF(uplo,n ,a,lda,info )
+])
+      character ::  uplo
+      integer :: info, lda,  n
+      complex(kind(1.0d0)) :: a
+
+m4_ifdef([CRAY],[
+  end subroutine cpotrf
+],[
+  end subroutine zpotrf
+])
+
+end interface
+
+
+
+interface mzpotri
+m4_ifdef([CRAY],[
+  subroutine CPOTRI(uplo,n ,a,lda,info )
+],[
+  subroutine ZPOTRI(uplo,n ,a,lda,info )
+])
+      character ::  uplo
+      integer :: info, lda,  n
+      complex(kind(1.0d0)) :: a
+
+m4_ifdef([CRAY],[
+  end subroutine cpotri
+],[
+  end subroutine zpotri
+])
+
+end interface
+
+interface mztrtri
+m4_ifdef([CRAY],[
+  subroutine CTRTRI(uplo,diag,n ,a,lda,info )
+],[
+  subroutine ZTRTRI(uplo,diag,n ,a,lda,info )
+])
+      character ::  uplo,diag
+      integer :: info, lda,  n
+      complex(kind(1.0d0)) :: a
+
+m4_ifdef([CRAY],[
+  end subroutine ctrtri
+],[
+  end subroutine ztrtri
+])
+
+
+end interface
+
+!
+!     
+!     --------------------------- BLAS 1 ---------------------------
+!
+
+interface mzaxpy
+m4_ifdef([CRAY],[	
+  subroutine caxpy(n, alpha, x, incx, y, incy)
+],[
+  subroutine zaxpy(n, alpha, x, incx, y, incy)
+])
+    integer :: n, incx, incy
+    complex(kind(1.0d0)) :: x, y, alpha
+
+  end subroutine
+end interface
+
+interface mzcopy
+m4_ifdef([CRAY],[	
+  subroutine ccopy(n, x, incx, y, incy)
+],[
+  subroutine zcopy(n, x, incx, y, incy)
+])
+    integer :: n, incx, incy
+    complex(kind(1.0d0)) x, y
+
+  end subroutine
+end interface 
+
+interface mzdotc
+m4_ifdef([CRAY],[	
+  complex(kind(1.0d0)) function cdotc(n, x, incx, y, incy)
+],[
+  complex(kind(1.0d0)) function zdotc(n, x, incx, y, incy)
+])
+    integer :: n, incx, incy
+    complex(kind(1.0d0)) x, y
+
+  end function
+end interface 
+
+interface mzdotu
+m4_ifdef([CRAY],[	
+  complex(kind(1.0d0)) function cdotu(n, x, incx, y, incy)
+],[
+  complex(kind(1.0d0)) function zdotu(n, x, incx, y, incy)
+])
+    integer :: n, incx, incy
+    complex(kind(1.0d0)) x, y
+
+  end function
+end interface 
+
+interface mzscal
+m4_ifdef([CRAY],[	
+  subroutine cscal(n, alpha, x, incx)
+],[
+  subroutine zscal(n, alpha, x, incx)
+])
+    integer :: n, incx
+    complex(kind(1.0d0)) :: x
+    complex(kind(1.0d0)) :: alpha
+
+  end subroutine
+
+end interface 
+
+interface mzdscal
+m4_ifdef([CRAY],[	
+  subroutine csscal(n, alpha, x, incx)
+],[
+  subroutine zdscal(n, alpha, x, incx)
+])
+    integer :: n, incx
+    complex(kind(1.0d0)) :: x
+    real(kind(1.0d0)) :: alpha
+
+  end subroutine
+
+end interface 
+
+
+interface mdaxpy
+m4_ifdef([CRAY],[	
+  subroutine saxpy(n, alpha, x, incx, y, incy)
+],[
+  subroutine daxpy(n, alpha, x, incx, y, incy)
+])
+    integer :: n, incx, incy
+    real(kind(1.0d0)) :: x, y, alpha
+
+  end subroutine
+end interface
+
+interface mdcopy
+m4_ifdef([CRAY],[	
+  subroutine scopy(n, x, incx, y, incy)
+],[
+  subroutine dcopy(n, x, incx, y, incy)
+])
+    integer :: n, incx, incy
+    real(kind(1.0d0)) x, y
+
+  end subroutine
+end interface 
+
+interface mddot
+m4_ifdef([CRAY],[	
+  real(kind(1.0d0)) function sdot(n, x, incx, y, incy)
+],[
+  real(kind(1.0d0)) function ddot(n, x, incx, y, incy)
+])
+    integer :: n, incx, incy
+    real(kind(1.0d0)) x, y
+
+  end function
+end interface 
+ 
+interface mdscal
+m4_ifdef([CRAY],[	
+  subroutine sscal(n, alpha, x, incx)
+],[
+  subroutine dscal(n, alpha, x, incx)
+])
+    integer :: n, incx
+    real(kind(1.0d0)) :: x
+    real(kind(1.0d0)) :: alpha
+
+  end subroutine
+
+end interface 
+
+
+!
+!     
+!     --------------------------- BLAS2 ---------------------------
+!
+
+interface mzgemv
+m4_ifdef([CRAY],[	
+  subroutine cgemv(ta, m, n, alf, a, lda, x, incx, bet, y, incy)
+],[
+  subroutine zgemv(ta, m, n, alf, a, lda, x, incx, bet, y, incy)
+])
+    integer :: m, n, lda, incx, incy
+    complex(kind(1.0d0)) alf, a, x, bet, y
+    character :: ta
+
+  end subroutine
+
+end interface 
+
+!
+!     
+!     --------------------------- BLAS3 ---------------------------
+!
+
+interface mzsymm
+m4_ifdef([CRAY],[	
+  subroutine csymm(ta, tb, m, n, alf, a, lda, b, ldb, bet, c, ldc)
+],[
+  subroutine zsymm(ta, tb, m, n, alf, a, lda, b, ldb, bet, c, ldc)
+])
+    integer :: m, n, k, lda, ldb, ldc
+    complex(kind(1.0d0)) :: alf, a, b, bet, c
+    character :: ta, tb
+
+  end subroutine
+
+end interface 
+
+interface mztrmm
+m4_ifdef([CRAY],[	
+  subroutine ctrmm(side, uplo, transa ,diag ,m , n, alf, a, lda, b, ldb)
+],[
+  subroutine ztrmm(side, uplo, transa ,diag , m, n, alf, a, lda, b, ldb)
+])
+    integer :: m, n, lda, ldb
+    complex(kind(1.0d0)) :: alf, a, b, bet
+    character :: side, uplo, transa ,diag
+
+  end subroutine
+
+end interface 
+
+interface mdgemm
+m4_ifdef([CRAY],[	
+  subroutine sgemm(ta, tb, m, n, k, alf, a, lda, b, ldb, bet, c, ldc)
+],[
+  subroutine dgemm(ta, tb, m, n, k, alf, a, lda, b, ldb, bet, c, ldc)
+])
+    integer :: m, n, k, lda, ldb, ldc
+    real(kind(1.0d0)) :: alf, a, b, bet, c
+    character :: ta, tb
+
+  end subroutine
+
+end interface 
+
+interface mzgemm
+m4_ifdef([CRAY],[	
+  subroutine cgemm(ta, tb, m, n, k, alf, a, lda, b, ldb, bet, c, ldc)
+],[
+  subroutine zgemm(ta, tb, m, n, k, alf, a, lda, b, ldb, bet, c, ldc)
+])
+    integer :: m, n, k, lda, ldb, ldc
+    complex(kind(1.0d0)) :: alf, a, b, bet, c
+    character :: ta, tb
+
+  end subroutine
+
+end interface 
+
+interface mzher2k
+m4_ifdef([CRAY],[	
+  subroutine cher2k(uplo, trans, n, k, alf, a, lda, b, ldb, bet, c, ldc)
+],[
+  subroutine zher2k(uplo, trans, n, k, alf, a, lda, b, ldb, bet, c, ldc)
+])
+    integer :: n, k,lda, ldb, ldc
+    complex(kind(1.0d0)) :: alf, a, b, bet, c
+    character :: uplo, trans
+
+  end subroutine
+
+end interface 
+
+interface mzherk
+m4_ifdef([CRAY],[	
+  subroutine cherk(uplo, trans, n, k, alf, a, lda, bet, c, ldc)
+],[
+  subroutine zherk(uplo, trans, n, k, alf, a, lda, bet, c, ldc)
+])
+    integer :: n, k, lda, ldc
+    complex(kind(1.0d0)) :: alf, a, bet, c
+    character :: uplo, trans
+
+  end subroutine
+
+end interface 

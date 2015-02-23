@@ -1,0 +1,1036 @@
+! Originally relax.c
+!
+!  program to relax the atoms and the lattice vectors such that
+!  the total energy acquires a minimum
+!  
+!  1996 Bernd Pfrommer
+!
+!  Modified Jan. 1999
+!  No major changes -- more of a spring clean while porting
+!  porting to a Hitach SR2201.
+!
+!  Greg McMullan
+!  hpcf 
+!  University of Cambridge
+!  
+!  Merged with existing code by Peter Haynes Jun 1999
+!
+!  Changed over to Fortran90 by Peter Haynes March 2000
+!
+!------------------------------------------------------------------------
+
+program relax
+
+  use constants
+  use pw_parameter_module
+  use kpoint_module
+  use band_module
+  use symmetry_module
+  use energy_module
+  use crystal_module
+  use esdf
+  use all_to_all_module
+  use molecular_dynamics_module
+  implicit none
+  include 'flibcalls.ph' 
+  include 'all_to_all.h'
+m4_ifdef([MPI],[include 'mpif.h'])
+
+  type(pw_parameter) :: pw_params ! plane wave parameters
+  type(kpoint) :: altkpoints      ! alternative BZ integration kpoints
+  type(band) :: bands             ! eigenvalues, occupation numbers etc
+  type(band) :: altbands          ! another set of eigenvalues etc..
+  type(symmetry) :: syms          ! symmetry operations
+  type(energy) :: energs          ! energies and other information
+  type(crystal) :: crys           ! crystal structure
+  type(molecular_dynamics) :: MD  ! molecular dynamics structure
+
+m4_ifdef([T3E],[
+  integer, parameter :: stdout = 101
+],[
+  integer, parameter :: stdout = 6
+])
+
+  integer, parameter :: logfile_c = 7
+  integer, parameter :: convergefile = 8
+  integer, parameter :: pwlogfile = 34
+  
+  real(dp) :: lvec(3, 3)               ! lattice vectors
+  real(dp) :: vinit                    ! initial volume
+
+  integer :: plen                      ! packed vector length
+  integer :: adjustpressure            ! flag to adjust pressure
+  integer :: POINT,NPT,ISPT,IYPT,max_lbfgs=7
+  real(dp) :: lambda_lbfgs
+  real(dp) kinetic_energy_ion
+
+  real(dp) :: relaxstress, relaxforce
+  real(dp) :: time_step,MD_temp
+  integer :: relax_method
+  integer :: relax_nproc = -1
+  integer :: relax_myproc = -1
+
+  integer :: relax_comm
+
+  integer :: iwfnreuse_c
+
+  integer ::  i, j, k, iter, itmax, iprobe, pwcount = 0, updateh, decoup_rc
+  integer ::  iupdateh, ntyp, mxdatm, diaginfo,ip
+
+  real(dp) :: relaxepsfac, relaxcoordfac, accuracy, avmass, &
+       bulkmodulus, optfreq
+  real(dp) :: discrim, etot, etot2, e0, e_here
+  real(dp) :: lambda, lambdalin, L_p1, L_p2, stress(9)
+  real(dp), allocatable :: &
+      x(:),xold(:),&   ! 1st 9 l.v. - rest atomic postions in direct units 
+      H(:), H0(:), &   ! approximation in onverse of dynamical matrix
+      g(:),gold(:),&   ! 1st 9 stress - rest forces in units of lvec*F_cart
+      metric(:),g_temp(:),g_temp_old(:), del_r(:,:)
+  real(dp), allocatable :: delta(:), pv(:), s(:), u(:), q(:)
+  real(dp) :: eps(9), mugwump(3), desideratum(3), &
+       lvecf(3, 3), atam1(3, 3), fsig(3, 3), &
+       feps(3, 3), fepsu(3, 3)
+  real(dp) :: p, v0, rho, adot, bdot, ldelta, lg, gnew, lgnew, &
+       lambdalimit, adoti, bdoti
+  real(dp) :: pst(9),fpst(3, 3),fupst(3, 3)
+  real(dp), allocatable :: eigenvalues(:), temp1(:), temp2(:)
+  real(dp) :: f0, g0, f1, g1, xsi, avar, bvar, cvar, lambda1, &
+       lambda2, disc, temp
+  real(dp) :: lambda_tolerance, lambda2_tolerance
+  real(dp) :: t0,gimmetime  
+  real(dp) in_pr11,in_pr12,in_pr13,in_pr22,in_pr23,in_pr33, inv_fac
+
+  character(len=1), parameter :: vchar = 'V', lchar = 'L'
+  character(len=llength) :: jobstring, relaxstring
+  integer :: alen
+
+  character(len=5), parameter :: input_file = 'input'
+  character(len=6), parameter :: pw_logfile = 'PW_LOG'
+  character(len=9), parameter :: struct_logfile = 'STRUC_LOG'
+  character(len=14), parameter :: converge_logfile = 'STRUC_CONVERGE'
+
+  integer :: ierr = 0
+  integer :: ios, istherecheckpoint
+
+  integer :: packlen
+  real(dp) :: matinvert, dotprod, funeval,temp
+
+  logical :: switchlv= .false.
+  logical irelax
+
+  real(dp) lvect_inv(3,3) !DBR
+  integer natom_tot,extrap
+
+! SETUP DATA 
+  integer, pointer,DIMENSION(:) :: natom
+
+  real(dp), pointer,DIMENSION(:) :: szet
+  real(dp),pointer, DIMENSION(:) :: mts
+  real(dp),pointer, DIMENSION(:) :: dipole
+  real(dp),pointer,DIMENSION(:)  :: coord
+  real(dp), pointer, DIMENSION(:) :: mass
+
+  real(dp), allocatable :: force(:)
+
+  character, pointer ,DIMENSION(:):: atm
+
+  INTERFACE
+
+  subroutine crystal_struc(myproc,mycomm,ntyp,mxatm,lvec,alen,&
+                        natom,szet,&
+                      mts,dipole,coord,atm,mass)
+  use constants  
+  use esdf
+  implicit none
+!m4_ifdef([MPI],[include 'mpif.h'])
+
+  integer, pointer,DIMENSION(:) :: natom
+
+  real(dp), pointer,DIMENSION(:) :: szet
+  real(dp),pointer, DIMENSION(:) :: mts
+  real(dp),pointer, DIMENSION(:) :: dipole
+  real(dp),pointer,DIMENSION(:)  :: coord
+  real(dp), pointer, DIMENSION(:) :: mass
+
+  character, pointer :: atm(:)
+
+  integer, intent(in) :: myproc, mycomm
+  integer, intent(out) :: ntyp, mxatm, alen
+  real(dp), intent(out) :: lvec(3, 3)
+
+  end subroutine crystal_struc
+
+END INTERFACE
+
+m4_ifdef([MPI],[
+  integer :: icount
+  integer :: ibuf(10)
+  real(dp) :: dbuf(20)
+])
+
+m4_ifdef([MPI],[
+  call MPI_Init(ierr) 
+  call MPI_Comm_rank(MPI_COMM_WORLD, relax_myproc, ierr)
+  call MPI_Comm_size(MPI_COMM_WORLD, relax_nproc, ierr)
+  call MPI_Comm_dup(MPI_COMM_WORLD, relax_comm, ierr)
+],[
+  relax_myproc = 0
+  relax_nproc = 1
+  relax_comm = 0
+])
+
+  iwfnreuse_c = 1  ! reuse wavefunctions by default
+
+  ! Move old logfiles out of the way
+
+     t0 = gimmetime()
+  if (relax_myproc == 0) then
+     call mvfile(pw_logfile, '.old')
+     call mvfile(struct_logfile, '.old')
+     call mvfile(converge_logfile, '.old')
+  end if
+
+  ! --------- read crystal structure and initialize -------------------
+	
+
+  if (relax_myproc == 0) then
+
+     call esdf_init(input_file)
+
+     open(34, file = 'PW_LOG',  &
+      status = 'unknown', form = 'formatted')
+
+     open(unit = logfile_c, file = struct_logfile, iostat = ios, &
+          form = 'formatted', status = 'replace')
+     if (ios /= 0) call mystop( 'Cannot open log file!' )
+
+     open(unit = convergefile, file = converge_logfile, iostat = ios, &
+          form = 'formatted', status = 'replace')
+     if (ios /= 0) call mystop( 'Cannot open converge file!' )
+
+  end if
+
+!  call crystal_struc(relax_myproc, relax_comm, ntyp, mxdatm, lvec(1, 1), alen)
+
+ call crystal_struc(relax_myproc, relax_comm, ntyp, mxdatm, lvec(1, 1), alen,&
+            natom,szet,mts,dipole,coord,atm,mass)
+   ! --------- get some other parameters needed ------------------
+
+  feps = lvec
+
+  vinit = matinvert(feps(1, 1))
+
+  if (vinit < dzero) then
+    write(convergefile,'(A)') &
+	    'The lattice vectors do not form a direct triad!!!'
+    write(convergefile,'(A)') &
+	    'Swapping lattice vector 1 and 2 to make it direct'
+    if (relax_myproc == 0) then 
+      write(convergefile, '(A)') &
+           'Alas, your lattice vectors are not right handed'  
+      write(convergefile, '(A)') &
+            'I will swap two of them for you'
+    end if
+    switchlv=.true.
+    do i=1,3
+      temp=lvec(3,i)
+      lvec(3,i)=lvec(2,i)
+      lvec(2,i)=temp
+    end do
+       do i = 1, ntyp                         ! ----- loop over types -----
+         do j = 1, natom(i)       ! ----- loop over atoms of this type---
+           ip = 3 * (j - 1 + (i - 1) * mxdatm) + 1
+           temp=coord(ip+2)
+           coord(ip+2)=coord(ip+1)
+           coord(ip+1)=temp
+         end do
+       end do
+
+    feps=lvec  
+    vinit=-vinit
+
+  end if
+
+  feps=transpose(lvec)
+  call create_crystal(crys, mxdatm, ntyp, coord, &
+       natom, atm, feps, szet, mts, dipole,lvec)
+
+  ! mass for the plane wave code
+   crys%totalmass = dzero
+  do i = 1, ntyp
+   crys%totalmass  =  crys%totalmass + mass(i) * natom(i)
+  end do
+
+  ! relaxation parameters for the coordinates
+  avmass = dzero  ! compute average mass
+  do i = 1, ntyp
+     avmass = avmass + mass(i)
+  end do
+  avmass = avmass / real(ntyp, dp)
+
+  ! some default values
+
+  bulkmodulus = done  ! in MBar, good for silicon
+  relaxepsfac = 147.1076d0 / (dthree * bulkmodulus * vinit)
+
+  optfreq = 15.0d0  ! in THz. Good for silicon
+  relaxcoordfac = done / (avmass * optfreq * optfreq * 8.4157d-5)
+
+  accuracy = 0.01d0
+
+  ! Get some other parameters needed
+
+  call read_param(relax_myproc, relax_comm, eps, mugwump, desideratum, &
+       decoup_rc, bulkmodulus, relax_method, MD,&
+       relaxepsfac, optfreq, relaxcoordfac, accuracy, relaxstring, p, &
+       adjustpressure, jobstring, lambdalimit, relaxstress, relaxforce, &
+       iupdateh, lambda_tolerance, lambda2_tolerance, itmax, avmass, vinit)
+
+  pw_params%extrapolation=MD%extrapolation
+   call fix_rotation(eps,mugwump, desideratum)
+
+  if (relax_myproc == 0) then
+     if (decoup_rc == 1) then
+        write(convergefile, '(A)') &
+             'DECOUPLING REALSPACE COORDINATES! COULD BREAK THE SYMMETRY!'
+     end if
+
+     if (bulkmodulus <= 1.0d-6) then
+        write(logfile_c, '(A,F6.2,A)') &
+             'estimated_bulk_modulus too small: ', bulkmodulus, ' MBar'
+     end if
+
+     write(logfile_c, '(3A)') '--------RELAXATION STYLE: ', &
+          trim(relaxstring), ' ---------'
+     write(logfile_c, '(A,F10.6)') 'relax_eps_factor = ', relaxepsfac
+     write(logfile_c, '(A,F10.6)') 'relax_coord_factor = ', relaxcoordfac
+     write(logfile_c, '(A,I1)') 'Hessian update: ', iupdateh
+
+     write(logfile_c, '(3A)') '--------JOB: ', trim(jobstring), ' ---------'
+
+  end if
+
+  ! read all the parameters for the planewave code
+
+  crys%ntype=ntyp
+  call read_pwparam(relax_myproc, relax_comm,pw_params,altkpoints,bands,&
+                      altbands,syms,energs,crys,lvec)
+
+  if(switchlv) then
+    i=altkpoints%grid(3)  
+  altkpoints%grid(3)=altkpoints%grid(2)
+  altkpoints%grid(2)=i
+  
+    temp= altkpoints%shift(3)
+   altkpoints%shift(3)  = altkpoints%shift(2)
+     altkpoints%shift(2)  =temp
+  end if
+
+
+  if (relax_myproc == 0) then
+     if (pw_params%epsdiag > accuracy * accuracy) then
+        write(logfile_c, '(A)') &
+             '*** WARNING: Matrix diagonalization not accurate enough ***'
+        write(logfile_c, '(A,G12.6)') &
+             '***          Decrease accuracy_diag to be less than ', &
+             accuracy * accuracy
+     end if
+
+     if (pw_params%epscv > accuracy) then
+        write(logfile_c, '(A)') &
+             '*** WARNING: Potential is not computed accurately enough ***'
+        write(logfile_c,'(A,G12.6)') '***          Decrease &
+             &potential_convergence_criterion to be less than ', &
+             accuracy * accuracy
+     end if
+
+  end if
+
+  ! --------- allocate the memory needed -------
+
+  allocate(force(3 * mxdatm * ntyp))
+
+  plen = packlen(ntyp, natom)
+
+  allocate(x(plen), xold(plen), metric(plen * plen), g(plen), gold(plen), &
+       delta(plen), pv(plen), q(plen), s(plen), u(plen), H(plen * plen), &
+       H0(plen * plen), temp1(plen * plen), temp2(plen * plen), &
+       eigenvalues(plen),g_temp(plen),g_temp_old(plen), del_r(plen,4))
+
+  irelax=.true.
+    if (trim(jobstring) == 'relax_from_checkpoint') then
+       call pack(ntyp, mxdatm, plen, natom, x, coord, eps) 
+       call readcheckpoint(plen, relax_myproc, relax_comm, x, g, H, H0, f1, lvec)
+      pw_params%ilog = 0
+   else if (trim(jobstring) == 'relax_recycle_H') then
+       call pack(ntyp, mxdatm, plen, natom, x, coord, eps)
+       call initialize_hessian(plen, x, H, relaxepsfac, relaxcoordfac, -1, &
+            decoup_rc, lvec)
+      H0 = H
+      call readhessian(plen, relax_myproc, relax_comm, H, H0, lvec)
+       pw_params%ilog = 0
+       ! calculate stress and forces
+     f1 = funeval(t0, plen, x, & 
+          p, etot, force, g, relax_myproc, & 
+            vinit, relaxstress, relaxforce, &
+           iwfnreuse_c, adjustpressure,pw_params,altkpoints,&
+          bands,altbands,syms,energs,crys)
+     pwcount = pwcount + 1
+  else if (trim(jobstring) == 'band_structure') then
+     write(*, '(A)') ' *** job band_structure is not allowed any more'
+     write(*, '(A)') ' *** use the pw_job variable instead.'
+     call mystop
+  else if (trim(jobstring) == 'relax') then ! pack initial values in x
+     call pack(ntyp, mxdatm, plen, natom, x, coord, eps)
+     call initialize_hessian(plen, x, H, relaxepsfac, relaxcoordfac, -1, &
+          decoup_rc, lvec)
+     H0 = H    
+     pw_params%ilog = 0
+     ! calculate stress and forces
+     f1 = funeval(t0, plen, x, p, etot, force, g, relax_myproc, & 
+            vinit, relaxstress, relaxforce, &
+           iwfnreuse_c, adjustpressure,pw_params,altkpoints,&
+          bands,altbands,syms,energs,crys)
+     pwcount = pwcount + 1
+  else if (trim(jobstring) == 'MD') then ! pack initial values in x
+     MD%n_deg_freedom=0
+     natom_tot=0
+     do i=1,ntyp
+       do j=1,natom(i)
+        natom_tot=natom_tot+1
+        do k=1,3
+          MD%n_deg_freedom=MD%n_deg_freedom+1
+        end do
+       end do
+     end do
+     MD%n_deg_freedom=max(MD%n_deg_freedom-3,3)
+     lvect_inv = transpose(lvec)
+     temp = matinvert(lvect_inv(1, 1))
+     irelax=.false.
+     allocate(MD%velocity(plen))
+     if (relax_myproc == 0) then     
+       call initialize_velocity(MD,plen,mxdatm,ntyp,natom,&
+                          lvect_inv,mass,natom_tot,lvec) 
+     end if
+     call my_broadcast(MD%velocity,plen,0)
+
+     call pack(ntyp, mxdatm, plen, natom, x, coord, eps)
+     relaxstress=dzero
+     ! calculate stress and forces
+     f1 = funeval(t0, plen, x, & 
+          p, etot, force, g, relax_myproc, & 
+            vinit, relaxstress, relaxforce, &
+           iwfnreuse_c, adjustpressure,pw_params,altkpoints,&
+          bands,altbands,syms,energs,crys)
+     pwcount = pwcount + 1
+  else
+     if (relax_myproc == 0) write(logfile_c, '(2A)') &
+          'No valid job variable set: ',trim(jobstring)
+     call mystop
+  end if
+
+  if (irelax) then   
+
+    call matvec(plen, H, g, delta)
+
+    gold = g
+    xold = x
+
+    lvect_inv = transpose(lvec)
+    temp = matinvert(lvect_inv(1, 1))
+    feps =  lvec
+    temp = matinvert(feps(1, 1))
+    call matmul(atam1,lvect_inv,feps )
+
+    g_temp_old(1:9)=gold(1:9)
+    call mdgemm('N','N',3,mxdatm*ntyp,3,done,atam1(1,1),3,gold(10),&
+               3,dzero,g_temp_old(10),3) 
+
+    lambda = done
+
+    call computemetric(plen, xold, xold, metric, 3, lvec)
+    rho = sqrt(dotprod(plen, gold, gold, metric))
+
+    if (relax_myproc == 0) then
+      write(logfile_c, '(A,F9.6)') 'rho = ', rho
+      write(convergefile, '(A,I3,A,F9.6,A,F14.6)') 'iteration ', 0, &
+          ' rho = ', rho, ' enthalpy = ', f1
+    end if
+
+    if (rho <= accuracy) then
+      if (relax_myproc == 0) then
+        write(logfile_c, '(A)') &
+             'already done at iteration 0!'
+        if (iand(pw_params%output(1), 134217728) == 134217728) &
+             call print_xyz(0, ntyp, mxdatm, natom, &
+             atm, alen, coord(1), lvec, f1)
+      end if
+m4_ifdef([MPI],[
+      call MPI_Finalize(ierr)
+])
+      call mystop
+    end if
+
+    if (itmax < 2 .and. relax_myproc == 0 .and. &
+       iand(pw_params%output(1), 134217728) == 134217728) &
+       call print_xyz(0, ntyp, mxdatm, natom, &
+       atm, alen, coord(1), lvec, f1)
+
+  ! ============================ begin main loop ===================
+
+    ISPT= plen+2*max_lbfgs      !DBR
+    IYPT= ISPT+plen*max_lbfgs
+    POINT=0
+ 
+    do iter = 1, itmax - 1
+      pw_params%ilog = iter
+      if (relax_myproc == 0) then
+        write(logfile_c, '(//A,I3,A)') '--------- iteration ', iter, &
+             ' -----------'
+        if (iand(pw_params%output(1), 134217728) == 134217728) &
+             call print_xyz(iter - 1, ntyp, mxdatm, natom, &
+             atm, alen, coord(1), lvec, f1)
+      end if
+
+      x = xold
+
+      ! FPRINTF(logfile_c,"Used following H matrix:\n");
+      !       for(i=0;i<plen;i++) {
+      !         for(j=0;j<plen;j++) {
+      !	   FPRINTF(logfile_c,"%f ", H[i*plen+j]);
+      !	   FPRINTF(logfile_c,"\n");
+      !	 }
+      !       }
+
+  
+      call update(plen, x, delta, dmone)                  ! x = x - delta
+      call fix_rotation(x, mugwump, desideratum)
+
+      f0 = f1
+      call computemetric(plen, xold, xold, metric, 1, lvec)   
+      g0 = -dotprod(plen, delta, g, metric)
+      call computemetric(plen, xold, xold, metric, 2, lvec)
+      ldelta = sqrt(dotprod(plen, delta, delta, metric))
+
+    if (pw_params%extrapolation .ge. 0) then ! .or. MD%extrapolation .ne. 10 ) then
+
+      extrap=mod( MD%extrapolation , 10)
+
+      if (iter .eq. 1) then
+        del_r(:,1)=x(:)-xold(:)
+        pw_params%MD_alpha=dzero
+        pw_params%MD_beta=dzero         
+      else if (iter .eq. 2 .or. extrap .eq. 0) then
+        del_r(:,2)= del_r(:,1)
+        del_r(:,1)=x(:)-xold(:)
+        pw_params%MD_alpha= done
+        pw_params%MD_beta=dzero
+      else 
+        del_r(:,3)= del_r(:,2)
+        del_r(:,2)= del_r(:,1)
+        del_r(:,1)=x(:)-xold(:)
+
+        in_pr11 = mddot(plen-9, del_r(10,1),1, del_r(10,1), 1)
+        in_pr12 = mddot(plen-9, del_r(10,1),1, del_r(10,2), 1)
+        in_pr13 = mddot(plen-9, del_r(10,1),1, del_r(10,3), 1)
+        in_pr22 = mddot(plen-9, del_r(10,2),1, del_r(10,2), 1)
+        in_pr23 = mddot(plen-9, del_r(10,2),1, del_r(10,3), 1)
+        in_pr33 = mddot(plen-9, del_r(10,3),1, del_r(10,3), 1)
+
+        inv_fac = 1/( in_pr22* in_pr33 - in_pr23* in_pr23)
+
+        if (mod(iter,extrap) .eq. 0) then
+          pw_params%MD_alpha= inv_fac* (in_pr33*in_pr12 - in_pr23*in_pr13)
+          pw_params%MD_beta= inv_fac* (-in_pr23*in_pr12 + in_pr22*in_pr13)
+        else
+          pw_params%MD_alpha=done
+          pw_params%MD_beta=dzero
+        end if
+
+      end if 
+
+    else
+
+      pw_params%MD_alpha=dzero
+      pw_params%MD_beta=dzero 
+    end if
+
+       write(34,*) pw_params%MD_beta, pw_params%MD_alpha, ' alpha'
+
+
+     f1 = funeval(t0, plen, x, p, etot, force, g, relax_myproc, & 
+            vinit, relaxstress, relaxforce, &
+           iwfnreuse_c, adjustpressure,pw_params,altkpoints,&
+          bands,altbands,syms,energs,crys)
+      pwcount = pwcount + 1
+
+      call computemetric(plen, xold, x, metric, 1, lvec)
+      g1 = -dotprod(plen, delta, g, metric)
+
+      call computemetric(plen, x, x, metric, 3, lvec)
+      rho = sqrt(dotprod(plen, g, g, metric))
+      lg = rho
+
+      if (rho <= accuracy) goto 999
+
+      lambdalin = -g0 / (g1 - g0)
+      lambda = lambdalin
+      updateh = iupdateh
+
+      if (lambda < 0) then
+        if (relax_myproc == 0) write(logfile_c, '(A)') &
+             '!!!! set lambda to 1 and initialized H!!!!!' 
+        call initialize_hessian(plen, x, H, relaxepsfac, relaxcoordfac, -1, &
+             decoup_rc, lvec)
+        H0 = H
+        updateh = 0       ! don't update H
+        lambda = done
+      end if
+      if (lambda > lambdalimit) then
+        if (relax_myproc == 0) write(logfile_c, '(A,2(F9.6,A))') &
+             '!!!! reduced lambda from ', lambda, ' to ', lambdalimit, ' !!!!!'
+        lambda = lambdalimit
+      end if
+
+      if (relax_myproc == 0) then
+        write(logfile_c, '(2(A,F12.6,A,G12.6))') &
+             'f0=', f0, ' g0=', g0, ' f1=', f1, ' g1=', g1
+        write(logfile_c, '(A,F9.6)') 'lambda from linear=', lambda
+
+        write(logfile_c, '(A,G12.6)') &
+             'trialstep: normalized product between vectors (g1,delta): ', &
+             -g1 / ldelta / lg
+      end if
+
+
+      if(abs(lambda - done) > lambda_tolerance .or. f0 .lt. f1 ) then
+        ! take shorter step if necessary
+        x = xold
+        call update(plen, x, delta, -lambda)
+        call fix_rotation(x, mugwump, desideratum)
+        if (relax_myproc == 0) write(logfile_c, '(A)') '####### move to new x'
+
+     f1 = funeval(t0, plen, x, & 
+          p, etot, force, g, relax_myproc, & 
+            vinit, relaxstress, relaxforce, &
+           iwfnreuse_c, adjustpressure,pw_params,altkpoints,&
+          bands,altbands,syms,energs,crys)
+
+        call computemetric(plen, xold, x, metric, 1, lvec)
+        gnew = -dotprod(plen, delta, g, metric)
+        call computemetric(plen, x, x, metric, 3, lvec)
+        rho = sqrt(dotprod(plen, g, g, metric))
+        lgnew = rho
+        if (rho <= accuracy) then
+           if (relax_myproc == 0) &
+                write(logfile_c, '(A)') 'converged at new x!'
+           goto 999
+        end if
+
+        if (relax_myproc == 0) write(logfile_c, '(A,G12.6)') &
+             'linear: normalized product between vectors (gnew,delta): ', &
+             -gnew / ldelta / lgnew
+        pwcount = pwcount + 1
+
+        cvar = g0
+        avar = (g1 - g0) * (g1 - g0) * gnew / (g0 * g1)
+        bvar = g1 - avar - g0
+
+        if (relax_myproc == 0) write(logfile_c, '(3(A,F9.6))') &
+             'a=', avar, ' b=', bvar, ' c=', cvar
+
+        discrim = bvar * bvar - dfour * avar * cvar
+        if (discrim < dzero) then
+           if (relax_myproc == 0) write(logfile_c, '(A)') &
+                'Error: complex roots. Taking linear lambda.'
+           lambda = lambdalin
+        else
+           if (abs(avar) < abs(cvar * 1.0d-6)) then
+              if (relax_myproc == 0) write(logfile_c, '(A)') &
+                   'quadratic term very small, doing linear fit.'
+              lambda = -cvar / bvar
+           else
+              L_p1 = (-bvar + sqrt(discrim)) / (dtwo * avar)
+              L_p2 = (-bvar - sqrt(discrim)) / (dtwo * avar)
+              if (abs(L_p1 - lambdalin) < abs(L_p2 - lambdalin)) then
+                 lambda = L_p1
+              else
+                 lambda = L_p2
+              end if
+           end if
+        end if
+        if (relax_myproc == 0) write(logfile_c, '(A,F9.6)') &
+             'lambda from parabola=', lambda
+
+        if (abs(lambda - lambdalin) > lambda2_tolerance * lambda ) then
+           if (relax_myproc == 0) write(logfile_c, '(A)') &
+                '################# moving to parabolic x'
+           x = xold
+           call update(plen, x, delta, -lambda)
+           call fix_rotation(x, mugwump, desideratum)
+
+     f1 = funeval(t0, plen, x, & 
+          p, etot, force, g, relax_myproc, & 
+            vinit, relaxstress, relaxforce, &
+           iwfnreuse_c, adjustpressure,pw_params,altkpoints,&
+          bands,altbands,syms,energs,crys)
+
+           pwcount = pwcount + 1
+           call computemetric(plen, xold, x, metric, 1, lvec)
+           gnew = -dotprod(plen, delta, g, metric)
+           call computemetric(plen, x, x, metric, 3, lvec)  
+           rho = sqrt(dotprod(plen, g, g, metric))
+           lgnew = rho
+
+           if (relax_myproc == 0) write(logfile_c, '(A,G12.6)') &
+                'parabolic: normalized product between vectors &
+                &(gnew,delta): ', -gnew / ldelta / lgnew
+           if (rho <= accuracy) then
+              if (relax_myproc == 0) write(logfile_c, '(A)') &
+                   'converged at new parabolic x!'
+              goto 999
+           end if
+           lambda_lbfgs=lambda  !DBR
+        else
+           lambda = lambdalin
+           lambda_lbfgs=lambda  !DBR
+           if (relax_myproc == 0) write(logfile_c, '(A)') &
+                'Did not move to lambda quadratic!'
+        end if
+      else
+        lambda_lbfgs=done  !DBR
+        if (relax_myproc == 0) then
+           write(logfile_c, '(A)') 'Trial step is close enough to &
+                &estimated minimum!'
+           write(logfile_c, '(A,G12.6)') &
+                'Normalized dot product between (g1,delta): ', -g1 / ldelta / lg
+        end if
+      end if
+
+999   continue
+      if (relax_myproc == 0) then
+        write(convergefile, '(A,I3,A,F9.6,A,F14.6)') 'iteration ', iter, &
+             ' rho = ', rho, ' enthalpy = ', f1
+        write(logfile_c, '(A,F9.6)') 'rho of new minimum position = ', rho
+        write(logfile_c, '(A,I3,A)') 'So far ', pwcount, &
+             ' call(s) to the pw program!'
+      end if
+
+      ! ------------ update H ---------------------
+
+      if (relax_method .eq. 1) then
+
+        if (updateh == 1) then
+	     pv = -lambda * delta
+	     q = g - gold
+	     call matvec(plen, H, q, s)          ! s = H*q
+
+	     adot = dzero ; bdot = dzero
+	     do i = 1, plen
+		adot = adot + pv(i) * q(i)
+		bdot = bdot + q(i) * s(i)
+	     end do
+	     adoti = done / adot ; bdoti = done / bdot
+
+	     u = adoti * pv - bdoti * s
+
+	     k = 0
+	     do i = 1, plen
+		do j = 1, plen
+		   k = k + 1
+		   H(k) = H(k) + pv(i) * pv(j) * adoti - s(i) * s(j) * bdoti + &
+			u(i) * u(j) * bdot
+		   temp1(k) = H(k)
+		end do
+	     end do
+        end if
+
+        ! for(i=0;i<plen;i++) {
+        !        for(j=0;j<plen;j++) {
+        !	   FPRINTF(logfile_c,"%f ", H[i*plen+j]);
+        !	   FPRINTF(logfile_c,"\n");
+        !	 }
+        !      } 
+
+        if (relax_myproc == 0) call checkpoint(plen, x, g, H, H0, f1)
+        if (rho <= accuracy) exit
+
+        ! ------------ apply H ---------------------
+
+        call matvec(plen, H, g, delta)
+
+        if (relax_myproc == 0) then
+	   write(logfile_c, '(A)') 'negative of suggested step direction:'
+	   call printpacked(plen, delta, lvec)
+        end if
+
+      else
+
+        call mdscal(plen,-lambda_lbfgs,delta(1),1)
+
+        NPT=POINT*plen
+        call mdcopy(plen,delta(1),1,H(ISPT+NPT+1),1)
+
+        lvect_inv = transpose(lvec)
+        temp = matinvert(lvect_inv(1, 1))
+        feps =  lvec
+        temp = matinvert(feps(1, 1))
+        call matmul(atam1,lvect_inv,feps )
+
+        g_temp(1:9)=g(1:9)
+        call mdgemm('N','N',3,mxdatm*ntyp,3,done,atam1(1,1),3,g(10),&
+               3,dzero,g_temp(10),3) 
+
+        do I=1,plen
+          H(IYPT+NPT+I)= g_temp(I)-g_temp_old(I)
+        end do
+
+        g_temp_old=g_temp
+        POINT=POINT+1
+        if (POINT.EQ.max_lbfgs)POINT=0
+
+        if (relax_myproc == 0) call checkpoint(plen, x, g, H, H0, f1)
+        if (rho <= accuracy) exit
+
+        call LBFGS(plen,max_lbfgs,g_temp(1),gold,H,ITER+1,POINT, NPT)
+  
+        call mdcopy(plen,H(1),1,delta(1),1)  
+        call mdscal(plen,dmone,delta(1),1)
+
+      end if
+
+     ! ----------- save old variables ----------------
+
+     gold = g
+     xold = x
+
+     if (relax_myproc == 0) then
+        call myflush(stdout)
+        call myflush(logfile_c)
+        call myflush(convergefile)
+     end if
+
+    end do
+
+  else
+
+    call md_step(plen,MD,x,xold,g,&
+                    gold,g_temp,g_temp_old,pwcount,&
+                     pw_params,mass,t0, p, etot, force,&
+                     relax_myproc, vinit, relaxstress, relaxforce, &
+                     iwfnreuse_c, adjustpressure,altkpoints,&
+                     bands,altbands,syms,energs,crys)
+
+  end if  ! for relax or MD
+
+
+  call apply_eps_lat(x, lvec, lvecf)
+
+  if (relax_myproc == 0) then
+     write(logfile_c, '(A)') 'final lattice vectors:'
+     do i = 1, 3
+        write(logfile_c, '(3F9.6)') lvecf(1,i), lvecf(2,i), lvecf(3,i)
+     end do
+
+     write(logfile_c, '(A)') 'H matrix:'
+
+     k = 1
+     do i = 1, plen
+        do j = 1, plen, 3
+           write(logfile_c, '(3(F9.6,X))') H(k:k+2)
+           k = k + 3
+        end do
+        write(logfile_c, *)
+     end do
+
+     write(logfile_c, '(A,I3,A)') 'It took ', pwcount, &
+          ' call(s) to the pw program!'
+
+  end if
+
+  ! exploit the H matrix
+
+  deallocate(x, force, xold, g, gold, H, delta, H0, mass)
+
+  if (relax_myproc == 0) then
+     close(logfile_c)
+     close(convergefile)
+  end if
+
+m4_ifdef([MPI],[
+  call MPI_Finalize(ierr)
+])
+
+end program relax
+
+
+function istherecheckpoint(relax_myproc)
+
+  use constants
+  implicit none
+  include 'flibcalls.ph'
+m4_ifdef([MPI],[include 'mpif.h'])
+
+  integer :: istherecheckpoint
+  integer, parameter :: logfile_c = 7
+
+  integer, intent(in) :: relax_myproc
+  character(len=10), parameter :: checkpointfile = 'CHECKPOINT'
+  integer :: ios
+  integer, parameter :: ckpfile = 10
+
+  if (relax_myproc == 0) then
+     open(unit = ckpfile, file = checkpointfile, iostat = ios, &
+          form = 'formatted', status = 'old')
+     if (ios /= 0) then
+        write(logfile_c,'(A)') 'THERE IS NO CHECKPOINT FILE.'
+        istherecheckpoint = 0
+     else 
+        istherecheckpoint = 1
+     endif
+     close(unit = ckpfile)
+  endif
+  return
+end function istherecheckpoint
+
+subroutine readcheckpoint(plen, relax_myproc, relax_comm, x, g, H, H0, f1, lvec)
+
+  use constants
+  implicit none
+  include 'flibcalls.ph'
+m4_ifdef([MPI],[include 'mpif.h'])
+
+  integer, parameter :: logfile_c = 7
+
+  integer, intent(in) :: plen, relax_myproc, relax_comm
+  real(dp), intent(out) :: x(plen), g(plen), H(plen * plen), H0(plen * plen), &
+       f1
+  real(dp), intent(in) :: lvec(3, 3)
+  real(dp) :: dumdum
+
+  character(len=10), parameter :: checkpointfile = 'CHECKPOINT'
+  integer :: i, ios, icount, ierr
+  integer, parameter :: ckpfile = 10
+  character(len=10) :: cdummy
+
+  if (relax_myproc == 0) then
+
+     write(logfile_c, '(A)') ' READING FROM CHECKPOINT FILE:'
+     open(unit = ckpfile, file = checkpointfile, iostat = ios, &
+          form = 'formatted', status = 'old')
+     if (ios /= 0) call mystop( 'CANNOT OPEN CHECKPOINT FILE -- STOP!' )
+
+     read(ckpfile, *)
+     do i = 1, plen
+        read(ckpfile, *) x(i)
+     end do
+
+     read(ckpfile, *)
+     do i = 1, plen
+        read(ckpfile, *) g(i)
+     end do
+
+     read(ckpfile, *)
+     do i = 1, plen * plen
+        read(ckpfile, *) H(i)
+     end do
+
+     read(ckpfile, *)
+     do i = 1, plen * plen
+        read(ckpfile, *) H0(i)
+     end do
+
+     read(ckpfile, '(A10,G30.20)') cdummy, f1
+
+     close(unit = ckpfile)
+
+     write(logfile_c, '(A)') 'checkpoint state:'
+     call printpacked(plen, x, lvec)
+     dumdum = mdnrm2(plen, g(1), 1)
+     write(logfile_c, '(A,F9.6,A)') 'checkpoint gradient has length ', &
+          dumdum, ':'
+     call printpacked(plen, g, lvec)
+     write(logfile_c, '(A,F14.6)') 'checkpoint enthalpy = ', f1
+
+     call myflush(logfile_c)
+
+  end if
+
+m4_ifdef([MPI],[
+  icount = plen
+  call MPI_Bcast(x(1), icount, MPI_DOUBLE_PRECISION, 0, relax_comm, ierr)
+  call MPI_Bcast(g(1), icount, MPI_DOUBLE_PRECISION, 0, relax_comm, ierr)
+  icount = plen * plen
+  call MPI_Bcast(H(1), icount, MPI_DOUBLE_PRECISION, 0, relax_comm, ierr)
+  call MPI_Bcast(H0(1), icount, MPI_DOUBLE_PRECISION, 0, relax_comm, ierr)
+  call MPI_Bcast(f1, 1, MPI_DOUBLE_PRECISION, 0, relax_comm, ierr)
+])
+
+end subroutine readcheckpoint
+
+ 
+ subroutine readhessian(plen, relax_myproc, relax_comm, H, H0, lvec)
+ 
+   use constants
+   implicit none
+   include 'flibcalls.ph'
+ m4_ifdef([MPI],[include 'mpif.h'])
+ 
+   integer, parameter :: logfile_c = 7
+ 
+   integer, intent(in) :: plen, relax_myproc, relax_comm
+   real(dp), intent(out) :: H(plen * plen), H0(plen * plen)
+   real(dp), intent(in) :: lvec(3, 3)
+   real(dp) :: dumdum
+ 
+   character(len=10), parameter :: checkpointfile = 'CHECKPOINT'
+   integer :: i, ios, icount, ierr
+   integer, parameter :: ckpfile = 10
+ 
+   if (relax_myproc == 0) then
+ 
+      write(logfile_c, '(A)') ' READING HESSIAN FROM CHECKPOINT FILE:'
+      open(unit = ckpfile, file = checkpointfile, iostat = ios, &
+           form = 'formatted', status = 'old')
+      if (ios /= 0) then
+         write(logfile_c, '(A)') '  CANNOT OPEN CHECKPOINT FILE!'
+         write(logfile_c, '(A)') &
+              '  Changing job to just relax (no H to recycle).'
+      else
+         read(ckpfile, *)
+         do i = 1, plen
+            read(ckpfile, *) dumdum
+         end do
+         read(ckpfile, *)
+         do i = 1, plen
+            read(ckpfile, *) dumdum
+         end do
+         
+         read(ckpfile, *)
+         do i = 1, plen * plen
+            read(ckpfile, *) H(i)
+         end do
+         
+         read(ckpfile, *)
+         do i = 1, plen * plen
+            read(ckpfile, *) H0(i)
+         end do
+         
+         close(unit = ckpfile)
+         
+         write(logfile_c, '(A)') 'Finished reading hessian.'
+      endif
+      call myflush(logfile_c)
+ 
+   end if
+ 
+ m4_ifdef([MPI],[
+   icount = plen
+   icount = plen * plen
+   call MPI_Bcast(H(1), icount, MPI_DOUBLE_PRECISION, 0, relax_comm, ierr)
+   call MPI_Bcast(H0(1), icount, MPI_DOUBLE_PRECISION, 0, relax_comm, ierr)
+ ])
+ 
+ end subroutine readhessian
+
+

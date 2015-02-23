@@ -1,0 +1,90 @@
+!-*-Fortran-*-
+!
+module flibcalls_module
+
+  contains
+  !
+  !     -------------- diagonalization routine ---------------------
+  !
+  subroutine zdiagh(n, a, lda, w, work, lwork, rwork) 
+
+    use constants
+    implicit none
+
+    integer :: lda, lwork, n, info
+    real(dp) :: rwork(*)
+    complex(dp) :: work
+m4_ifdef([SGI_PC],[
+    complex(dp), intent(inout) :: a
+    real(dp), intent(out) :: w
+],[
+m4_ifdef([HODGKIN],[
+    complex(dp), intent(inout) :: a
+    real(dp), intent(out) :: w
+],[
+m4_ifdef([CRAY],[
+    complex(dp), intent(inout) :: a(:)
+    real(dp), intent(out) :: w(:)
+],[
+m4_ifdef([CVX],[
+    complex(dp), intent(inout) :: a
+    real(dp), intent(out) :: w
+],[
+m4_ifdef([SR2201],[
+    complex(dp), intent(inout) :: a(lda * n)
+    real(dp), intent(out) :: w(n)
+],[
+
+    complex(dp), intent(inout) :: a(*)
+    real(dp), intent(out) :: w(*)
+!    complex(dp), intent(inout) :: a(lda * n)
+!    real(dp), intent(out) :: w(n)
+])
+])
+])
+])
+])
+    !
+    !     --------- local variables ----------------------------
+    !
+    integer :: i, j, k
+    complex(dp), allocatable :: dmat(:)
+    character :: jobz, uplo
+
+    uplo = 'L'
+    jobz = 'V'
+
+m4_ifdef([CRAY],[
+    call cheev(jobz, uplo, n, a, lda, w, work, lwork, rwork(1), info)
+],[
+m4_ifdef([RS6K],[
+    !
+    !     due to a bug in the lapack routines, we must do a
+    !     workaround to use the ESSL library routine
+    !     
+    !
+    !     first pack the matrix
+    !
+    allocate(dmat((n * (n+1)) / 2))
+    do j = 1, n
+       do i = j, n
+          k = i + ((2*n-j) * (j-1)) / 2
+          dmat(k) = a(i + (j-1) * lda)
+       end do
+    end do
+    call zhpev(1, dmat(1), w(1), a(1), lda, n, work, 2*lwork)
+    info = 0
+    deallocate(dmat)
+],[
+    call zheev(jobz, uplo, n, a, lda, w, work, lwork, rwork(1), info)
+])
+])
+
+    if(info /= 0) write(9,110) info
+    return
+
+110 format('Error in submatrix diagonalization:',i10)
+
+  end subroutine zdiagh
+
+end module flibcalls_module

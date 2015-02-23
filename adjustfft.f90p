@@ -1,0 +1,293 @@
+!
+subroutine adjustfft(nfft, symms)
+
+  include 'use.h'
+  implicit none             ! implicit? Just say no
+  include 'interface.h'
+
+  !
+  !     1996 Bernd Pfrommer
+  !     
+  !     
+
+  !
+  !     INPUT:
+  !     -----
+
+  type(symmetry) :: symms       ! the symmetry operations of the crystal
+  !
+  !     INPUT/OUTPUT:
+  !     ------------
+
+  integer :: nfft(3)            ! fft grid dimensions
+  !
+  !     DESCRIPTION
+  !     -----------
+  !
+  !     Increases the fft grid in nfft(3) to fit a suitable value, e.g.
+  !     a power of two, three ...
+  !
+  !     Also checks to make sure the resulting grid is compatible with
+  !     the nonprimitive translations, e.g. if there is a translation
+  !     of 1/3, the grid must be a multiple of 3.
+  !
+  !
+  !     ------------------- local arrays ---------------------------
+
+  integer :: i, j, k, ns
+  real(dp) :: tau
+
+  logical :: ifit
+
+m4_ifdef([GPFA],[
+  integer, parameter :: numfast = 86
+  integer, parameter :: fastsize(numfast) = (/ &
+       1,   2,   3,   4,   5 ,  6,   8,   9,  10, &
+       12,  15,  16,  18,  20,  24,  25,  27,  30, & 
+       32,  36,  40,  45,  48,  50,  54,  60,  64, &
+       72,  75,  80,  81,  90,  96, 100, 108, 120, &
+       128, 135, 144, 150, 160, 162, 180, 192, &
+       200, 216, 225, 240, 243, 250, 256, &
+       270, 288, 300, 320, 324, 360, 375, &
+       384, 400, 405, 432, 450, 480, 486, &
+       500, 512, 540, 576, 600, 625, 640, &
+       648, 675, 720, 729, 750, 768, 800, &
+       810, 864, 900, 960, 972, 1000, 1024 /)
+])
+
+m4_ifdef([SGI_PC],[
+  integer, parameter :: numfast = 74 
+  integer, parameter :: fastsize(numfast) = (/ &
+       1,  2,  4, 8, 16, 18, &
+       20, 24, 25, 32, 36, 40, 50, &
+       54, 64, 72, 75, 80, &
+       81, 90, 96,100,108, &
+       120,125,128,144,150, &
+       160,162,180,192,200, &
+       216,225,240,243,250, 256, &
+       270, 288, 300, 320, 324, 360, 375, &
+       384, 400, 405, 432, 450, 480, 486, &
+       500, 512, 540, 576, 600, 625, 640, &
+       648, 675, 720, 729, 750, 768, 800, &
+       810, 864, 900, 960, 972, 1000, 1024 /)
+])
+
+m4_ifdef([HODGKIN],[
+  integer, parameter :: numfast = 74 
+  integer, parameter :: fastsize(numfast) = (/ &
+       1,  2,  4, 8, 16, 18, &
+       20, 24, 25, 32, 36, 40, 50, &
+       54, 64, 72, 75, 80, &
+       81, 90, 96,100,108, &
+       120,125,128,144,150, &
+       160,162,180,192,200, &
+       216,225,240,243,250, 256, &
+       270, 288, 300, 320, 324, 360, 375, &
+       384, 400, 405, 432, 450, 480, 486, &
+       500, 512, 540, 576, 600, 625, 640, &
+       648, 675, 720, 729, 750, 768, 800, &
+       810, 864, 900, 960, 972, 1000, 1024 /)
+])
+
+m4_ifdef([RS6K],[
+  integer, parameter :: numfast = 99
+  integer, parameter :: fastsize(numfast) = (/ &
+       2,4,6,8,10,12,14,16,18, &
+       20,22,24,28,30,32,36,40,42, &
+       44,48,56,60,64,66,70,72,80, &
+       84,88,90,96,110,112,120,126,128, &
+       132,140,144,154,160,168,176,180,192, &
+       198,210,220,224,240,252,256,264,280, &
+       288,308,320,330,336,352,360,384,396, &
+       420,440,448,462,480,504,512,528,560, &
+       576,616,630,640,660,672,704,720,768, &
+       770,792,840,880,896,924,960,990,1008, &
+       1024,1056,1120,1152,1232,1260,1280,1320,1344 /)
+])
+
+m4_ifdef([ALPHA],[
+  integer, parameter :: numfast = 88
+  integer, parameter :: fastsize(numfast) = (/ &
+       1,   2,   3,   4,   5 ,  6,   8,   9,  10, &
+       12,  15,  16,  18,  20,  24,  25,  27,  30, &
+       32,  36,  40,  45,  48,  50,  54,  60,  64, &
+       72,  75,  80,  81,  90,  96, 100, 108, 120, &
+       125, 128, 135, 144, 150, 160, 162, 180, 192, &
+        200, 216, 225, 240, 243, 250, 256, 270, 280, &
+        288, 300, 320, 324, 360, 375, 384, 400, 405, &
+        432, 450, 480, 486, 500, 512, 540, 576, 600, &
+        625, 640, 648, 675, 720, 729, 750, 768, 800, &
+        810, 864, 900, 960, 972, 1000, 1024 /) 
+])
+
+m4_ifdef([CVX],[
+  integer, parameter :: numfast = 85
+  integer, parameter :: fastsize(numfast) = (/ &
+       1, 2, 3, 4, 5, 6, 8, 9, 10, &
+       16, 18, 20, 24, 25, 27, 30, &
+       32, 36, 40, 45, 48, 50, 54, 60, 64, &
+       72, 75, 80, 81, 90, 96, 100, 108, 120, &
+       125, 128, 135, 144, 150,160, 162, 180, 192, &
+       200, 216, 225, 240, 243, 250, 256, 270, 288, &
+       300, 320, 324, 360, 375, 384, 400, 405, 432, &
+       450, 480, 486, 500, 512, 540, 576, 600, 625, &
+       640, 648, 675, 720, 729, 750, 768, 800, 810, &
+       864, 900, 960, 972, 1000, 1024 /)
+])
+
+m4_ifdef([CRAY],[
+  integer, parameter :: numfast = 86
+  integer, parameter :: fastsize(numfast) = (/ &
+       1,   2,   3,   4,   5 ,  6,   8,   9,  10, &
+       12,  15,  16,  18,  20,  24,  25,  27,  30, &
+       32,  36,  40,  45,  48,  50,  54,  60,  64, &
+       72,  75,  80,  81,  90,  96, 100, 108, 120, &
+       128, 135, 144, 150, 160, 162, 180, 192, &
+       200, 216, 225, 240, 243, 250, 256, &
+       270, 288, 300, 320, 324, 360, 375, &
+       384, 400, 405, 432, 450, 480, 486, &
+       500, 512, 540, 576, 600, 625, 640, &
+       648, 675, 720, 729, 750, 768, 800, &
+       810, 864, 900, 960, 972, 1000, 1024 /)
+])
+
+m4_ifdef([SUN],[
+  integer, parameter :: numfast = 86
+  integer, parameter :: fastsize(numfast) = (/ & 
+       1,   2,   3,   4,   5 ,  6,   8,   9,  10, & 
+       12,  15,  16,  18,  20,  24,  25,  27,  30, &
+       32,  36,  40,  45,  48,  50,  54,  60,  64, & 
+       72,  75,  80,  81,  90,  96, 100, 108, 120, &
+       128, 135, 144, 150, 160, 162, 180, 192, &
+       200, 216, 225, 240, 243, 250, 256, &
+       270, 288, 300, 320, 324, 360, 375, &
+       384, 400, 405, 432, 450, 480, 486, &
+       500, 512, 540, 576, 600, 625, 640, &
+       648, 675, 720, 729, 750, 768, 800, &
+       810, 864, 900, 960, 972, 1000, 1024 /)
+])
+
+m4_ifdef([SR2201],[ m4_ifnotdef([GPFA],[
+  integer, parameter :: numfast = 86
+  integer, parameter :: fastsize(numfast) = (/ &
+       1,   2,   3,   4,   5 ,  6,   8,   9,  10, &
+       12,  15,  16,  18,  20,  24,  25,  27,  30, & 
+       32,  36,  40,  45,  48,  50,  54,  60,  64, &
+       72,  75,  80,  81,  90,  96, 100, 108, 120, &
+       128, 135, 144, 150, 160, 162, 180, 192, &
+       200, 216, 225, 240, 243, 250, 256, &
+       270, 288, 300, 320, 324, 360, 375, &
+       384, 400, 405, 432, 450, 480, 486, &
+       500, 512, 540, 576, 600, 625, 640, &
+       648, 675, 720, 729, 750, 768, 800, &
+       810, 864, 900, 960, 972, 1000, 1024 /)
+])   ])
+
+m4_ifdef([FFTW],[
+  do i=1,3
+    ! redundant check
+    ifit = .false.
+    do while( .not.(ifit) )
+      nfft(i) = fastnum( nfft(i) )
+      ! check if nfft(i) is compatible with symmetry
+      ifit=.true. ! this check redundant for some reason
+      ! if not increase nfft(i)
+      if( .not.(ifit) ) nfft(i)=nfft(i)+1
+    enddo
+  enddo
+],[
+  do i = 1, 3 
+     do j = nfft(i), fastsize(numfast)
+        !
+        !     check if j is compatible with the nonprimitive translations
+        !
+        ifit = .true.
+        !
+        !     check if this is also an allowed fft grid size
+        !
+        if (ifit) then
+           do k = 1, numfast
+              if (fastsize(k) == j) goto 10
+           end do
+        end if
+     end do
+     write(9,110) i, nfft(1:3), maxval(fastsize)
+     call mystop( 'adjustfft' )
+
+10   continue
+     nfft(i) = j
+  end do
+]) 
+
+  return
+
+110 format(' *** ERROR IN ADJUSTFFT: ', &
+       'FFT GRIDSIZE EXCEEDS IN DIRECTION',i3, &
+       /' FFT GRIDSIZE = ', 3i6, &
+       /' MAX GRIDSIZE = ', i6, &
+       /'     THIS CAN BE DUE TO STRANGE NONPRIMITIVE', &
+       /'     TRANSLATIONS IN THE SYMMETRY OPERATIONS', &
+       /'     OR JUST BECAUSE THE SYSTEM IS TOO BIG.', &
+       /'     ADD LARGER FFT SIZES IN ADJUSTFFT OR', &
+       /'     IMPROVE THE COORDINATES/LATTICE VECTORS.')
+
+m4_ifdef([FFTW],[
+  contains
+
+  function fastnum( nfft_in )
+
+  integer :: fastnum
+  integer,intent(in) :: nfft_in
+
+  integer :: nfft_out
+  integer :: n, i
+  integer :: prim(6), primpower(6)
+  logical :: notfound
+
+! FFTW - best grids are given by : 2^a*3^b*5^c*7^d*11^e*13^f
+!        a,b,c,d are arbitary, e,f are 0,1
+
+  ! allowed prime factors
+  prim = (/ 2, 3, 5, 7, 11, 13 /)
+
+  nfft_out=nfft_in
+  notfound=.true.
+  do while( notfound )
+
+    notfound=.false.
+    n=nfft_out
+    primpower=0
+
+    ! generate prime power expansion
+    do i=1,size(prim)
+
+      do while( mod(n,prim(i))==0 )
+
+        n=n/prim(i)
+        primpower(i)=primpower(i)+1
+
+      enddo
+
+    enddo
+
+    n=1
+    do i=1,size(prim)
+      n=n*prim(i)**primpower(i)
+    enddo
+
+    if( n/=nfft_out .or. primpower(5) > 1 .or. primpower(6) > 1 ) then
+      notfound=.true.
+      nfft_out=nfft_out+1
+    endif
+
+  enddo
+
+  ! final result
+  fastnum = nfft_out
+
+  end function fastnum
+])
+
+end subroutine adjustfft
+
+

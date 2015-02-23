@@ -1,0 +1,109 @@
+!
+subroutine isort_gather(ipr, mysort, gsstruct, gs)
+  !
+  !     creates global isort array
+  !
+m4_ifdef([CRAY],[m4_define([MPI_INTEGER4],[MPI_INTEGER])])
+m4_ifdef([INT4],[m4_define([MPI_INTEGER4],[MPI_INTEGER])])
+  use vqmc_gspace_module
+  include 'use.h'
+  implicit none             ! implicit? no!
+m4_ifdef([MPI],[include 'mpif.h'])
+  include 'interface.h'
+  !
+  !     1996 Bernd Pfrommer
+  !
+  !
+  !     INPUT:
+  !     -----
+  !
+  type(gspace), intent(in) :: &
+       gsstruct                      ! a structure containing the whole gspace
+  type(parallel_gspace), intent(in) :: gs                ! the parallel gspace 
+  integer, intent(in) :: &
+       ipr                  ! print flag
+  !
+  !     OUTPUT:
+  !     ------
+  !
+  integer, intent(out) :: &
+       mysort(1:gs%length)          ! the global map between data and gsstruct
+  !
+  !
+  !     DESCRIPTION:
+  !     -----------
+  !
+  !     Sets up the isort array from the parallel gspace, which
+  !     associates:
+  !
+  !      data(mysort(i)) <=> gstruct%gvec(:,i)
+  !
+  !
+  !     --------- local variables ---------------------------
+  !
+  integer :: i, j, k, info
+  integer, external :: findvec
+  integer, allocatable :: recvcount(:), displs(:), ibuf(:)
+  !
+  !     allocate buffer space
+  !
+  allocate(ibuf(gs%length))
+
+  k = 0
+
+  do i = 1, gsstruct%length
+     j = findvec(gsstruct%gvec(1, i), gs)
+     if (j > 0) then
+        k = k + 1
+        ibuf(j) = i
+     end if
+  end do
+
+  if (k /= gs%length) then
+     write(0, *) 'gspace does not enclose data completely!'
+     call mystop
+  end if
+
+  if (gs%nproc > 1) then
+m4_ifdef([MPI],[
+     !
+     write(9, *) '** WARNGING isort_gather: not debugged!'
+
+     !
+     !        set up displs and recvcount arrays
+     !
+     allocate(recvcount(gs%nproc))
+     allocate(displs(gs%nproc))
+     recvcount = 0
+     displs = 0
+
+     displs(gs%myproc) = k
+
+     call mpi_reduce(displs, recvcount, MPI_INTEGER4, MPI_SUM, 0, &
+          MPI_COMM_WORLD, info)
+
+     j = 0
+     do i = 1, k
+        displs(i) = j
+        j = j + recvcount(i)
+     end do
+     !
+     !        now gather everything to processor 0
+     !            
+     call mpi_gatherv(ibuf, k, MPI_INTEGER4, &
+          mysort, recvcount, displs, MPI_INTEGER4, &
+          0, MPI_COMM_WORLD, info)
+     deallocate(recvcount)
+     deallocate(displs)
+])
+  else
+     mysort(1:gs%length) = ibuf(1:gs%length)
+  end if
+  !
+  !     now processor 0 has the global isort array
+  !
+  deallocate(ibuf)
+
+  return
+
+end subroutine isort_gather

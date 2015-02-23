@@ -1,0 +1,260 @@
+!-*-F90-*- 
+!
+Subroutine cg_startguess(ham, crys, gapp, rk,ukqapp, uk, ukqtil, &
+     e_kapp, e_kqapp, p0, noccup, ioutput)
+
+  Use all_to_all_module
+  Include 'use.h'
+  Implicit None
+  Include 'interface.h'
+  Include 'all_to_all.h'
+  Include 'flibcalls.ph'
+  !
+  !     INPUT:
+  !     -----
+  !
+  Integer, Intent(in) :: &
+       ioutput, &           ! output flag
+       p0, &                ! direction in which the p0 operator acts
+       noccup               ! number of occupied states
+  Type(hamiltonian), Intent(inout) :: ham 
+  Type(crystal), Intent(in) :: crys 
+  Type(parallel_gspace), Intent(in) :: gapp ! small sub-gspace
+  Complex(dp), Intent(in) :: &
+       ukqapp(*), &         ! approximate wave functions u_k+q
+       uk(ham%dim,noccup)   ! all occupied states at k
+  Real(dp), Intent(in) :: &
+       rk(3), &             ! the kpoint at which we are 
+       e_kapp(gapp%length), & ! energy eigenvalues of u_k
+       e_kqapp(gapp%length) ! energy eigenvalues of u_k+q
+  !
+  !     OUTPUT:
+  !     ------
+  !
+  Complex(dp), Intent(out) :: &
+       ukqtil(ham%dim, noccup) ! the desired wave function ukqtilde
+  !
+  !     DESCRIPTION:
+  !     -----------
+  !
+  !     generate the starting guess for the conjugate gradient linear systems
+  !     solver in the magnetic susceptibility code.
+  !
+  !
+  !     1997 Bernd Pfrommer
+  !
+  !
+  !     
+  !     ------------------ local variables ------------------------------
+  !
+  Integer :: &
+       i, j, info, &
+       wfnlist(1), &        ! dummy for put_gset
+       nempty, &            ! number of unoccupied states in subspace
+       n,  &                ! dimension of subspace
+       nbc,igc,ibc,ic, &    ! column index variables
+       nbr,igr,ibr,ir,ngr, &! row index variables
+       ihomo, ilumo,  &     ! homo and lumo pointers
+       nb,            &     ! scalapack block size
+       iam, &               ! blacs processor index
+       nprow, npcol, &      ! blacs number of proc rows and cols
+       mypcol, myprow, &    ! blacs processor column and row 
+       nprocblacs, &        ! blacs number of procs. must be nproc
+       nproc, &             ! number of processors
+       myproc, &            ! global rank of myproc
+       ngmax, nfft(3), gr(3), subcomm, subcommc
+
+  Integer, Allocatable :: glistr(:)
+  Real(dp) :: kq(3), t0, rnum
+  Real(dp), External :: gimmetime
+  Complex(dp), Allocatable :: &
+       mat(:), &            ! some work array
+       ukapp(:), &          ! packed version of uk
+       gradukapp(:)         ! gradient of approximate uk
+  Complex(dp) :: ssum
+  !
+  !     ---------------------------------------------------------------------
+  !
+  t0 = gimmetime()
+
+  n      = gapp%length      ! dimension of subspace
+  nempty = gapp%length-noccup
+  nproc = ham%gspace%nproc
+  myproc = ham%gspace%myproc
+  ilumo = noccup + 1        ! index of lumo
+  ihomo = noccup            ! index of homo
+
+  m4_ifdef([SCALAPACK],[
+  !
+  !     since we are using scalapack, it is assumed that the grid
+  !     initialization etc has already been done when computing the
+  !     starting vectors. Here, the blacs calls are just to get info
+  !     about the variables.
+  !
+  Call layout_scalapack(n, nb, nproc, nprow, npcol)
+  Call blacs_pinfo(iam, nprocblacs) ! how many procs does BLACS see
+  Call blacs_gridinfo(blacs_context, nprow, npcol, myprow, mypcol) 
+  If (iam /= myproc) Then
+     Write(9, *) ' cg_startguess: blacs ranks different from mpi!'
+     Stop
+  End If
+  !
+  !     now create an MPI subgroup to be used for the reduction later on
+  !
+  Call all_split_all(myprow, iam, subcomm)
+  Call all_split_all(mypcol, iam, subcommc)
+  ],[
+  nb = 1; nprow = 1; npcol = 1; mypcol = 0; myprow = 0;
+  ])
+
+  Write(9, 400) n, nprow, npcol, nb
+  !
+  !     figure out number of blocks per processor in the row
+  !
+  nbr = n / (nb*nprow) ; If (Mod(n,(nb*nprow)) > myprow*nb) nbr = nbr + 1
+  nbc = n / (nb*npcol) ; If (Mod(n,(nb*npcol)) > mypcol*nb) nbc = nbc + 1
+  ngmax     = nb*nbr        ! upper bound for g list
+  !
+  !     set up the list of row gvectors on this processor
+  !
+  nfft = ham%gspace%fftsize(1:3)
+
+  Allocate(glistr(ngmax))
+  ngr = 0
+  Do ibr = 0, nbr - 1          ! loop over row blocks
+     Do ir = (ibr*nprow+myprow)*nb+1, &
+          Min((ibr*nprow+myprow)*nb+nb,n) ! loop over row
+        ngr = ngr + 1
+        gr(1:3) = gapp%gvec(1:3,ir)
+        glistr(ngr) =  Mod(gr(3)+nfft(3), nfft(3)) + &
+             Mod(gr(2)+nfft(2), nfft(2))*nfft(3) + &
+             Mod(gr(1)+nfft(1), nfft(1))*nfft(3)*nfft(2)
+     End Do
+  End Do
+
+  Allocate(gradukapp(gapp%length))
+  Allocate(ukapp(gapp%length))
+  Allocate(mat(nempty))
+  mat = zzero
+
+  Do i = 1, noccup
+     !
+     !        compute the gradient of the approximate wave function ukapp
+     !
+     Call regspace(ham%gspace, uk(1,i), gapp, ukapp(1)) ! pack large wavefn
+
+     Call derivative_gspace(p0, ukapp(1), gapp, crys, gradukapp(1))
+     !
+     !        dot into approximate u_k+q:   ukqapp
+     !
+     m4_ifdef([SCALAPACK],[
+     igc = 0 ; mat = zzero 
+     Do ibc = 0, nbc - 1        ! loop over column blocks
+        Do ic = (ibc*npcol+mypcol)*nb+1, &
+             Min((ibc*npcol+mypcol)*nb+nb,n) 
+           igc = igc + 1
+           If(ic > noccup) Then
+              igr = 0
+              Do ibr = 0, nbr-1 ! loop over row blocks
+                 Do ir = (ibr*nprow+myprow)*nb+1, &
+                      Min((ibr*nprow+myprow)*nb+nb,n) ! loop over row
+                    igr = igr + 1
+                    mat(ic-noccup) = mat(ic-noccup) + &
+                         Conjg(ukqapp(igr+(igc-1)*ngr)) * gradukapp(ir)
+                 End Do
+              End Do
+           End If
+        End Do
+     End Do
+     Call all_sum_all(mat, nempty)
+     ],[
+     Call mzgemm('C', 'N', nempty, 1, gapp%length, zone, &
+          ukqapp(1+(ilumo-1)*gapp%length), gapp%length, &
+          gradukapp(1), gapp%length, zzero, mat(1), nempty)
+     ])
+     !
+     !        prepare matrix mat with     1/(eps_ki - eps_k+q,j) factor
+     !     
+     Do j = 1,nempty
+        If (Abs(e_kapp(i) - e_kqapp(ihomo+j)) < 1.0d-6) Then
+           Write(9, 127) 
+127        Format(' *** WARNING: SUBMATRIX INDICATES', &
+                ' METALLIC SYSTEM IN CGSTARTGUESS!')
+           Call Random_number(rnum)
+           mat(j) = mat(j) * rnum
+        Else
+           mat(j) = mat(j) / (e_kapp(i) - e_kqapp(ihomo+j))
+        End If
+     End Do
+     !
+     !        perform sum over empty states:
+     !
+     !        delta |phi_i> = sum_j     |phi_j> <phi_j| grad | phi_i>/(e_i-e_j)
+     !                                           `---------------------------'
+     !                                              = mat(j) for fixed i
+     !
+     m4_ifdef([SCALAPACK],[
+     gradukapp = zzero
+
+     igc = 0
+     Do ibc = 0, nbc - 1        ! loop over column blocks
+        Do ic = (ibc*npcol+mypcol)*nb+1, &
+             Min((ibc*npcol+mypcol)*nb+nb,n) 
+           igc = igc + 1
+           If(ic > noccup) Then
+              Do igr = 1, ngr
+                 gradukapp(igr) = gradukapp(igr) + &
+                      ukqapp(igr+(igc-1)*ngr) * mat(ic-noccup)
+              End Do
+           End If
+        End Do
+     End Do
+     Call all_sum_all_sub(subcomm, gradukapp, ngr)
+     ],[
+     Call mzgemm('N', 'N', gapp%length, 1, nempty, zone, &
+          ukqapp(1+(ilumo-1)*gapp%length), gapp%length, mat(1), & 
+          nempty, zzero, gradukapp(1), gapp%length)
+     ])
+     !
+     !        gradukapp now contains the approximate u_kq~, 
+     !
+     wfnlist(1) = 1
+     kq(:) = ham%gspace%rk(:) ! save k+q
+     ham%gspace%rk(:) = rk(:) ! set the kpoint to be k
+     ukqtil(1:ham%gspace%length,i) = zzero
+     !
+     !         ssum =0
+     !         do j=1,ngr
+     !            ssum = ssum+gradukapp(j)*conjg(gradukapp(j))
+     !         end do
+     !         call all_sum_all_sub(subcommc, ssum)
+     !         write(9,*) i, ssum
+     !
+     Call compute_ekin_gspace(ham%gspace, crys) ! recompute kinetic energy
+     Call put_gset(ngr, glistr, 1, wfnlist, gradukapp(1), &
+          gapp%gmax, ham%gspace, ukqtil(1,i), 1)
+     ham%gspace%rk(:) = kq(:)                   ! undo changes from before
+     Call compute_ekin_gspace(ham%gspace, crys) ! now k+q gives energy again
+  End Do
+
+  Deallocate(glistr)
+  Deallocate(ukapp)
+  Deallocate(gradukapp)
+  Deallocate(mat)
+
+  If (Iand(ioutput,8) == 8) Then
+     Write(9, 930) gimmetime() - t0
+     Call myflush(9)
+  End If
+
+  m4_ifdef([SCALAPACK],[
+  Call mpi_comm_free(subcomm, info)
+  Call mpi_comm_free(subcommc, info)
+  ])
+  Return
+
+400 Format (' CG START GUESS SIZE ',i5, &
+       ' PROCESSOR GRID ',i3,' x ',i3,' BLOCKSIZE ',i3)
+930 Format (' TIME FOR CG START GUESS:', f12.3, ' SECONDS')
+
+End Subroutine cg_startguess

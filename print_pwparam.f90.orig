@@ -1,0 +1,171 @@
+!
+subroutine print_pwparam(ipr, pw)  
+  !
+  !     prints out information about the gspace
+  !
+  !     (1996) Bernd Pfrommer
+  !
+  include 'use.h'  
+  implicit none              ! never
+  include 'interface.h'  
+  !
+  !     INPUT:
+  !     ------
+  !
+  integer, intent(in) :: ipr                ! print level flag
+  type(pw_parameter), intent(in) :: pw      ! the parameters to be printed out
+  !
+  !     ----------   local variables  --------------------------
+  !
+  integer :: i, j, k  
+
+  if (ipr > 0) then  
+     if (pw%icorr == 'ca') write(9, 90)  
+     if (pw%icorr == 'pw') write(9, 92)  
+     if (pw%icorr == 'pb') write(9, 93)  
+     write(9, 106) pw%emax  
+     write(9, 107) pw%emaxmix  
+     write(9, 109) pw%emaxsub  
+     write(9, 110) pw%epscv  
+     write(9, 122) pw%shiftsafety  
+     write(9, 124) pw%epsdiag  
+     write(9, 125) pw%diag_method
+     write(9, 126) pw%mix_method
+     if (pw%nbandsfft > 1) write(9, 127) pw%nbandsfft
+
+     if(pw%smearing_method.eq.1) then
+       write(9,*) 'GAUSSIAN BROADENING'
+     elseif(pw%smearing_method .eq.2) then
+       write(9,*) 'FERMI-DIRAC BROADENING'
+     elseif(pw%smearing_method.eq.3) then
+       write(9,*) 'HERMITE-DIRAC BROADENING'
+     elseif(pw%smearing_method.eq.4) then
+       write(9,*) 'GAUSSIAN SPLINES BROADENING'
+     elseif(pw%smearing_method.eq.5) then
+       write(9,*) 'COLD SMEARING I'
+     elseif(pw%smearing_method.eq.6) then
+       write(9,*) 'COLD SMEARING II'
+     endif
+     write(9, 120) pw%smearing  
+     if (pw%ekinmod(1) > dzero) write(9, 108) pw%ekinmod(1), &
+          pw%ekinmod(2), pw%ekinmod(3)
+     if (pw%random_startvec > dzero) write(9, 115) pw%random_startvec
+     if (pw%mfield%gvec(4) /= 0) then  
+        write(9, 550) pw%mfield%gvec(1), pw%mfield%gvec(2), &
+             pw%mfield%gvec(3), pw%mfield%h
+     end if
+     if (pw%epot%gvec(4) /= 0) then  
+        write (9, 560) pw%epot%gvec(1:3), pw%epot%h  
+     end if
+     if ( pw%NL_rspace(1)) write(9, 190) 
+     if (iand(pw%optimize, 1) == 1) write(9, 200)  
+     if (iand(pw%optimize, 2) == 2) write(9, 201)  
+     if (iand(pw%optimize, 4) == 4) write(9, 202)  
+     if (iand(pw%optimize, 8) == 8) write(9, 203)  
+     if (iand(pw%optimize, 16) /= 16) write(9, 204)  
+     if (iand(pw%optimize, 32) /= 32) write(9, 205)  
+     if (iand(pw%optimize, 64) == 64) write(9, 206)
+     if (pw%nbandsfft > 1) write(9, 207) pw%nbandsfft
+     if (iand(pw%optimize, 128) == 128) write(9, 208)
+     if (iand(pw%optimize, 256) == 0) write(9, 209)
+
+     if (iand(pw%miscflag, 1) == 1) write(9, 215) 'NO RESTORE INVERSION'
+     if (iand(pw%miscflag, 2) == 2) write(9, 215) 'CHECKPOINT NMR'  
+
+     if (pw%checkpoint_wfn < 1000000) write(9, 230) pw%checkpoint_wfn
+     if (iand (pw%input, 1) == 1) write(9, 220) 'WAVEFN'  
+     if (iand (pw%input, 2) == 2) write(9, 220) 'LUKMAN'  
+     if (iand (pw%input, 4) == 4) write(9, 220) 'CHKPTCHI'
+  
+     if (iand(pw%output(1), 1) == 1) write(9, 210) 'DIAGPERF'  
+     if (iand(pw%output(1), 2) == 2) write(9, 210) 'VQMC'  
+     if (iand(pw%output(1), 4) == 4) write(9, 210) 'NMRSHIFT'  
+     if (iand(pw%output(1), 8) == 8) write(9, 210) 'TIMING'  
+     if (iand(pw%output(1), 16) == 16) write(9, 210) 'CDPLOT'  
+     if (iand(pw%output(1), 32) == 32) write(9, 210) 'BALLNSTICK'  
+     if (iand(pw%output(1), 64) == 64) write(9, 210) 'NEIGHBORS'  
+     if (iand(pw%output(1), 128) == 128) write(9, 210) 'DOS'  
+     if (iand(pw%output(1), 256) == 256) write(9, 210) 'WAVEPLOT'  
+     if (iand(pw%output(1), 512) == 512) write(9, 210) 'WAVEFN'  
+     if (iand(pw%output(1), 1024) == 1024) write(9, 210) 'ANGDOS'  
+     if (iand(pw%output(1), 2048) == 2048) write(9, 210) 'EIGVAL'  
+     if (iand(pw%output(1), 4096) == 4096) write(9, 210) 'MOMDENS'  
+     if (iand(pw%output(1), 8192) == 8192) write(9, 210) 'ANGLES'  
+     if (iand(pw%output(1), 16384) == 16384) write(9, 210) &
+          'BALLSWRAPPED'
+     if (iand(pw%output(1), 32768) == 32768) write(9, 210) 'KHOROS'  
+     if (iand(pw%output(1), 65536) == 65536) write(9, 210) &
+          'MEMUSAGE'
+     if (iand(pw%output(1), 131072) == 131072) write(9, 210) &
+          'EFIELD'
+     if (iand(pw%output(1), 262144) == 262144) write(9, 210) &
+          'POTPLOT'
+     if (iand(pw%output(1), 524288) == 524288) write(9, 210) 'GWR'  
+     if (iand(pw%output(1), 1048576) == 1048576) write(9, 210) &
+          'GWC'
+     if (iand(pw%output(1), 2097152) == 2097152) write(9, 210) &
+          'GWSCREENING'
+     if (iand(pw%output(1), 4194304) == 4194304) write(9, 210) &
+          'PROJECT'
+     if (iand(pw%output(1), 8388608) == 8388608) write(9, 210) &
+          'EQN3'
+     if (iand(pw%output(1), 16777216) == 16777216) write(9, 210) &
+          'EQN8'
+     if (iand(pw%output(1), 33554432) == 33554432) write(9, 210) &
+          'CRYSTAL'
+     if (iand(pw%output(1), 67108864) == 67108864) write(9, 210) &
+          'ORIGINAL'
+     if (iand(pw%output(1), 134217728) == 134217728) write(9, 210) &
+          'XYZ'
+     if (iand(pw%output(1), 268435456) == 268435456) write(9, 210) &
+          'APPENDOUT'
+     if (iand(pw%output(1), 536870912) == 536870912) write(9, 210) &
+          'DIAGCONV'
+     if (iand(pw%output(1), 1073741824) == 1073741824) write(9, 210) &
+          'FERMISURF'
+     if (iand(pw%output(2), 1) == 1) write(9, 210) 'CURRENT'
+     if (iand(pw%output(2), 2) == 2) write(9, 210) 'CURPROJ'
+  end if
+
+  call myflush(9)
+  
+90 FORMAT(/,' EXCHANGE-CORRELATION: CEPERLEY-ALDER')  
+92 FORMAT(/,' EXCHANGE-CORRELATION: PERDEW-WANG 91')  
+93 FORMAT(/,' EXCHANGE-CORRELATION: PERDEW-BURKE-ERNZERHORF 96')  
+100 FORMAT(2X,10F8.4)  
+106 FORMAT(/,' ENERGY CUTOFF EMAX               = ',F12.6)  
+107 format(  ' BROYDEN MIXING CUTOFF            = ',F12.6)  
+108 format(/,' MODIFIED KINETIC ENERGY: A = ',F9.4, &
+       &     ', E0 = ',F9.4,', SIGMA = ',F9.4)
+109 FORMAT(  ' ENERGY SUBMATRIX CUTOFF EMAX     = ',F12.6)
+110 format(  ' POTENTIAL CONVERGENCE CRITERION  = ',g12.6)  
+115 format(  ' RANDOM DIAGONALIZATION STARTING  = ',g12.6)  
+122 format(  ' SAFETY FOR DIAGONALIZATION       = ',f12.6)  
+124 format(  ' DIAGONALIZATION ACCURACY         = ',g12.6)  
+125 format(  ' DIAGONALIZATION METHOD           = ',g12.6)
+126 format(  ' POTENITAL MIXING  METHOD         = ',g12.6)
+127 format(  ' NUMBER OF BANDS FOR FFT          = ', i3)
+        
+120 format(  ' SMEARING PARAMETER [eV]          = ',f12.6)  
+190 format(' USING REAL-SPACE NON-LOCAL PROJECTION')
+200 format(' OPTIMIZING FOR MEMORY USAGE')  
+201 format(' OPTIMIZING STARTING GUESS IN NMR CALCULATION')  
+202 format(' OPTIMIZING CGSOLVEGUESS IN NMR CALCULATION')  
+203 format(' OPTIMIZING FOR INSULATOR (DIRECT ENERGY MINIMIZATION)')  
+204 format(' NOT REUSING THE WAVE FUNCTION FROM PREVIOUS RELAXATION')  
+205 format(' PRECONDITIONING SWITCHED OFF! WANT A PERFORMANCE HIT?')  
+206 format(' OPTIMIZING FOR METAL (DIRECT ENERGY MINIMIZATION)')  
+207 format(' OPTIMIZING FFT:',i5,' BANDS SIMULTANEOUS')  
+208 format(' CONJUGATE GRADIENTS SWITCHED OFF! USING STEEPEST DESCENTS')
+209 format(' SHIFT ADJUSTMENT SWITCHED OFF')
+210 format(' ADDITIONAL OUTPUT: ',a)  
+215 format(' MISC FLAG: ',a)  
+220 format(' ADDITIONAL INPUT: ',a)  
+
+230 format(' DIRECT EMIN CHECKPOINTING WAVE FUNCTION EVERY', &
+         &     i4,' STEPS')
+550   format(' MAGNETIC FIELD WITH G= ',3i3,' AND STRENGTH ',f12.6)  
+
+560   format(' ELECTRIC POTENTIAL WITH G= ',3i3,' AND STRENGTH ',f12.6)  
+
+end subroutine print_pwparam

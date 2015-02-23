@@ -1,0 +1,1014 @@
+
+  subroutine overlap(irk1_fbz,irk2_fbz,ib1,ib2,G0,kpoints,k_gspace, &
+                     wavefn,overlap_sum,syms,ind_rot_g,ind_rot_inv_g,gmax_all, &
+                     g_to_ind,ind_to_g)
+
+  include 'use.h'
+  use all_to_all_module
+  implicit none               ! never remove this line.
+  include 'all_to_all.h'
+m4_ifdef([MPI],[
+      include 'mpif.h'
+])
+
+  !     INPUT:
+
+!-------------------------------------
+! k'=k2+G0
+! what we need to calculate is <k1|k'>
+! if k' is out of the first BZ, we 
+! find k2 such that k'=k2+G0. We have
+! 
+! C(k')[G-G0]=C(k2)[G]
+!------------------------------------
+
+
+  type(kpoint), intent(in) :: kpoints     ! BZ integration kpoints
+  type(symmetry), intent(in) :: syms 
+  type(parallel_gspace), intent(in) :: k_gspace(*)
+  type(complex_gspace_array), intent(in) ::  wavefn 
+  double complex::overlap_sum
+  integer::irk1_fbz,irk2_fbz,ib1,ib2,G0(3),gmax_all(3)
+  integer::ind_rot_g((2*gmax_all(1)+1)*(2*gmax_all(2)+1)*(2*gmax_all(3)+1),syms%mtrans)
+  integer::ind_rot_inv_g((2*gmax_all(1)+1)*(2*gmax_all(2)+1)*(2*gmax_all(3)+1),syms%mtrans)
+  integer::g_to_ind(2*gmax_all(1)+1,2*gmax_all(2)+1,2*gmax_all(3)+1)
+  integer::ind_to_g(3,(2*gmax_all(1)+1)*(2*gmax_all(2)+1)*(2*gmax_all(3)+1))
+
+  !
+  !     INPUT/OUTPUT:
+  !     -------------
+  !
+
+! local variables
+  integer::irk1,irk2,jj,ip,ig,kk,ng1,ng2,ng,myproc,nproc,ierr,g1,g2,g3
+  integer::iproc,count,ndim,ind,ind1,nx,ny,nz,ix,iy,iz,irot1,irot2,ntrans1,mtrans1,ntrans2,mtrans2
+  double precision::phase_tem
+  double complex::overlap_tem,cphase_tem
+
+  integer,allocatable::gtem(:,:)
+  integer,allocatable::ng1all(:),ng2all(:)
+  double complex,allocatable::wavefn_all(:),wavefn_tem(:)
+
+  double precision::ktem(3)
+!---------------------------------------------------------
+
+  count=3
+
+  if(.not.kpoints%reduced) then
+
+  irot1=0
+  irot2=0
+  irk1=irk1_fbz
+  irk2=irk2_fbz
+
+  else
+
+  irot1=1
+  irot2=1
+
+  irk1=kpoints%kmap(irk1_fbz)
+
+  if(irk1.lt.0) then
+
+! irk1_fbz is within IBZ
+
+     irk1=-irk1
+     irot1=0
+
+  end if
+
+  irk2=kpoints%kmap(irk2_fbz)
+
+  if(irk2.lt.0) then
+
+! irk2_fbz is within IBZ
+
+     irk2=-irk2
+     irot2=0
+
+  end if
+  end if
+
+
+! check k points
+
+!  if(irot1.eq.1) then
+!    jj=kpoints%ind_symtr(irk1_fbz)
+!    ktem(1)=syms%mtrx(1, 1, jj)*kpoints%rk(1,irk1)+syms%mtrx(1, 2, jj)*kpoints%rk(2,irk1)+syms%mtrx(1, 3, jj)*kpoints%rk(3,irk1)
+!    ktem(2)=syms%mtrx(2, 1, jj)*kpoints%rk(1,irk1)+syms%mtrx(2, 2, jj)*kpoints%rk(2,irk1)+syms%mtrx(2, 3, jj)*kpoints%rk(3,irk1)
+!    ktem(3)=syms%mtrx(3, 1, jj)*kpoints%rk(1,irk1)+syms%mtrx(3, 2, jj)*kpoints%rk(2,irk1)+syms%mtrx(3, 3, jj)*kpoints%rk(3,irk1)
+!    if(abs(SUM(ktem+kpoints%ind_G0(:,irk1_fbz)-kpoints%rk_fbz(:,irk1_fbz))).gt.0.000001d0) then
+!       write(*,*) "something is wrong"
+!       write(*,("2i5,3f10.5"))irk1,irk1_fbz,ktem+kpoints%ind_G0(:,irk1_fbz)
+!       write(*,("2i5,3f10.5"))irk1,irk1_fbz,kpoints%rk_fbz(:,irk1_fbz)
+!       stop
+!    end if
+!  end if
+
+!  if(irot2.eq.1) then
+!    jj=kpoints%ind_symtr(irk2_fbz)
+!    ktem(1)=syms%mtrx(1, 1, jj)*kpoints%rk(1,irk2)+syms%mtrx(1, 2, jj)*kpoints%rk(2,irk2)+syms%mtrx(1, 3, jj)*kpoints%rk(3,irk2)
+!    ktem(2)=syms%mtrx(2, 1, jj)*kpoints%rk(1,irk2)+syms%mtrx(2, 2, jj)*kpoints%rk(2,irk2)+syms%mtrx(2, 3, jj)*kpoints%rk(3,irk2)
+!    ktem(3)=syms%mtrx(3, 1, jj)*kpoints%rk(1,irk2)+syms%mtrx(3, 2, jj)*kpoints%rk(2,irk2)+syms%mtrx(3, 3, jj)*kpoints%rk(3,irk2)
+!    if(abs(SUM(ktem+kpoints%ind_G0(:,irk2_fbz)-kpoints%rk_fbz(:,irk2_fbz))).gt.0.000001d0) then
+!       write(*,*) "something is wrong"
+!       write(*,("2i5,3f10.5"))irk2,irk2_fbz,ktem+kpoints%ind_G0(:,irk2_fbz)
+!       write(*,("2i5,3f10.5"))irk2,irk2_fbz,kpoints%rk_fbz(:,irk2_fbz)
+!       stop
+!    end if
+!  end if
+       
+  myproc=k_gspace(irk1)%myproc
+  nproc=k_gspace(irk1)%nproc
+
+  allocate(ng1all(nproc))
+  allocate(ng2all(nproc))
+
+  ng1=k_gspace(irk1)%length
+  ng2=k_gspace(irk2)%length
+
+m4_ifdef([MPI],[
+    call mpi_barrier(MPI_COMM_WORLD, ierr)
+
+! gmax
+
+    call mpi_allgather(ng1,1, MPI_INTEGER,ng1all,1,MPI_INTEGER, &
+                     MPI_COMM_WORLD, ierr)
+ 
+    call mpi_allgather(ng2,1, MPI_INTEGER,ng2all,1,MPI_INTEGER, &
+                     MPI_COMM_WORLD, ierr)
+
+    ndim=(2*gmax_all(1)+1)*(2*gmax_all(2)+1)*(2*gmax_all(3)+1)
+
+    allocate(wavefn_all(ndim))
+    wavefn_all=(0.d0,0.d0)
+
+    do iproc=0,nproc-1
+
+       ndim=ng1all(iproc+1)
+
+       allocate(wavefn_tem(ndim))
+       allocate(gtem(3,ndim))
+
+       if(myproc.eq.iproc) then
+         gtem(:,:)=k_gspace(irk1)%gvec(:,:)
+         wavefn_tem(:)=wavefn%data((ib1-1)*ndim+1:ib1*ndim,irk1,1)
+       end if
+!
+! broadcast irk1 information
+
+       call mpi_bcast(gtem(1,1), count*ndim, MPI_INTEGER, &
+         iproc, MPI_COMM_WORLD, ierr)
+       call mpi_bcast(wavefn_tem(1), ndim, MPI_DOUBLE_COMPLEX, &
+         iproc, MPI_COMM_WORLD, ierr)
+
+! store the wavefunction in proper order
+       nx=2*gmax_all(1)+1
+       ny=2*gmax_all(2)+1
+
+       do jj=1,ndim
+
+          ix=gtem(1,jj)+gmax_all(1)+1
+          iy=gtem(2,jj)+gmax_all(2)+1
+          iz=gtem(3,jj)+gmax_all(3)+1
+
+!          ind=ix+(iy-1)*nx+(iz-1)*nx*ny
+           ind=g_to_ind(ix,iy,iz)
+
+          wavefn_all(ind)=wavefn_tem(jj)
+       end do
+
+       deallocate(wavefn_tem)
+       deallocate(gtem)
+
+    end do
+
+] )
+
+
+! now do the partial summation
+
+    overlap_tem=0.d0
+
+! ndim now stores number of g vectors in myproc, which is ng2all(myproc+1)
+! since myproc starts from 0
+
+    ndim=ng2all(myproc+1)
+
+    nx=2*gmax_all(1)+1
+    ny=2*gmax_all(2)+1
+
+!----------------------
+!  C(k')[G-G0]=C(k2)[G]
+!
+!  C(k')[G-G0]C(k1)^*(G-G0) 
+! =C(k2)[G]C(k1)^*(G-G0)
+!
+!----------------------
+
+    if(irot2.eq.1) then
+       mtrans2=syms%ind_ktrans(abs(kpoints%ind_symtr(irk2_fbz)))
+       ntrans2=syms%ind_inv(mtrans2)
+    end if
+    if(irot1.eq.1) then
+       mtrans1=syms%ind_ktrans(abs(kpoints%ind_symtr(irk1_fbz)))
+       ntrans1=syms%ind_inv(mtrans1)
+    end if
+
+    do jj=1,ndim
+
+       g1=k_gspace(irk2)%gvec(1,jj)
+       g2=k_gspace(irk2)%gvec(2,jj)
+       g3=k_gspace(irk2)%gvec(3,jj)
+
+       phase_tem=0.d0
+
+       if(irot2.ne.1) then
+
+          g1=g1-G0(1)
+          g2=g2-G0(2)
+          g3=g3-G0(3)
+
+       end if
+
+       ix=g1+gmax_all(1)+1
+       iy=g2+gmax_all(2)+1
+       iz=g3+gmax_all(3)+1
+
+!       ind=ix+(iy-1)*nx+(iz-1)*nx*ny
+        ind=g_to_ind(ix,iy,iz)
+
+       if(irot2.eq.1) then
+
+!          mtrans=syms%ind_ktrans(abs(kpoints%ind_symtr(irk2_fbz)))
+!          ntrans=syms%ind_inv(mtrans)
+
+          phase_tem=g1*syms%tnp(1,ntrans2)+ g2*syms%tnp(2,ntrans2)+ g3*syms%tnp(3,ntrans2)
+
+          ind=ind_rot_g(ind,mtrans2)
+
+! recover g
+
+           g1=ind_to_g(1,ind)
+           g2=ind_to_g(2,ind)
+           g3=ind_to_g(3,ind)
+
+! add translation connecting neighbor points
+
+          g1=g1-G0(1)
+          g2=g2-G0(2)
+          g3=g3-G0(3)
+
+          g1=g1-NINT(kpoints%ind_G0(1,irk2_fbz))
+          g2=g2-NINT(kpoints%ind_G0(2,irk2_fbz))
+          g3=g3-NINT(kpoints%ind_G0(3,irk2_fbz))
+
+!          if((abs(g1).ge.gmax_all(1)).or.(abs(g2).ge.gmax_all(2)).or.(abs(g3).ge.gmax_all(3))) then
+!             write(*,*) "something is wrong here"
+!             stop
+!          end if
+
+          ix=g1+gmax_all(1)+1
+          iy=g2+gmax_all(2)+1
+          iz=g3+gmax_all(3)+1
+
+!          ind=ix+(iy-1)*nx+(iz-1)*nx*ny
+           ind=g_to_ind(ix,iy,iz)
+
+        end if
+
+       if(irot1.eq.1) then
+
+!          mtrans=syms%ind_ktrans(abs(kpoints%ind_symtr(irk1_fbz)))
+!          ntrans=syms%ind_inv(mtrans)
+
+          g1=g1+NINT(kpoints%ind_G0(1,irk1_fbz))
+          g2=g2+NINT(kpoints%ind_G0(2,irk1_fbz))
+          g3=g3+NINT(kpoints%ind_G0(3,irk1_fbz))
+
+          ix=g1+gmax_all(1)+1
+          iy=g2+gmax_all(2)+1
+          iz=g3+gmax_all(3)+1
+
+!          ind=ix+(iy-1)*nx+(iz-1)*nx*ny
+          ind=g_to_ind(ix,iy,iz)
+
+          ind=ind_rot_inv_g(ind,mtrans1)
+
+          g1=ind_to_g(1,ind)
+          g2=ind_to_g(2,ind)
+          g3=ind_to_g(3,ind)
+
+          phase_tem=phase_tem-g1*syms%tnp(1,ntrans1)- g2*syms%tnp(2,ntrans1)- g3*syms%tnp(3,ntrans1)
+           
+       end if 
+
+       cphase_tem=DCMPLX(dcos(phase_tem),dsin(phase_tem))
+
+       overlap_tem=overlap_tem+wavefn%data((ib2-1)*ndim+jj,irk2,1)*DCONJG(wavefn_all(ind))*cphase_tem
+    end do
+
+
+! gather partial summations
+
+m4_ifdef([MPI],[
+   call MPI_Reduce (overlap_tem,overlap_sum, 1, &
+                MPI_DOUBLE_COMPLEX, MPI_SUM, 0, MPI_COMM_WORLD,ierr)
+
+    call mpi_barrier(MPI_COMM_WORLD, ierr)
+!   if(myproc.eq.0) write(9,*) "overlap,irk1,irk2,ib1,ib2",irk1,irk2,ib1,ib2,overlap_sum
+
+    deallocate(wavefn_all)
+])
+     return
+     end subroutine overlap
+
+!---------------------------------------------------------------------------------------
+  subroutine wannier(k_gspace, energs, crys, syms, kpoints, bands, wavefn)
+
+
+  include 'use.h'
+  use all_to_all_module
+  implicit none               ! never remove this line.
+  include 'all_to_all.h'
+m4_ifdef([MPI],[
+      include 'mpif.h'
+])
+
+
+  !
+  !     INPUT:
+  !     -----
+  !
+  type(symmetry), intent(in) :: syms      ! symmetry operations
+  type(crystal) :: crys       ! crystal structure
+  type(kpoint), intent(in) :: kpoints     ! BZ integration kpoints
+                                          ! false otherwise
+  type(parallel_gspace), intent(in) :: k_gspace(*)
+  !
+  !     INPUT/OUTPUT:
+  !     -------------
+  !
+  type(energy), intent(inout) :: energs   ! energies and other information
+  type(band), intent(inout) :: bands      ! eigenvalues, occupation numbers etc
+  type(complex_gspace_array), intent(inout) ::  wavefn 
+                            ! wave functions for all kpoints,
+
+
+! local variables
+
+  integer::i,j,k,ii,jj,kk,ll,mm,nn,ia,im,jm,ib,jb,is,irk,irk_fbz,ncenter,ng,ndim,nrk,ns,ierr
+  integer::ngrid1,ngrid2,ier,ind,nband0,nband1,proj_flag,myproc,ix,iy,iz,nx,ny,irot,n_neig
+  character*16::a16
+  integer::LEFT
+
+!---------------------------------------------------------------------
+! wannier code inputs (as defined in wannier.input)
+
+  logical:: LEXTRACT,LWAV,LINVSYMM,LRESTART,LAMN,LRGUIDE,LINTP_BAND
+  integer::NBANS,NFIRST,NKPTS,IPHASE
+
+  integer::NTARGET,NITERE,NITER0,NITER,NCG,NWAVKIND,NRGUIDE,NIONST,NSPEC
+  integer::NSHELLS,NMONKH(3),INSIGN,NIONSP(100),WHICHSHELLS(100)
+  double precision::WIN_MIN,WIN_MAX,FROZ_MIN,FROZ_MAX,ALPHAFIXE,ALPHAFIX0,ALPHAFIX,SCALF
+  double precision::ZVAL(100)
+!---------------------------------------------------------------------
+ 
+  double precision::rc,tau(3),kkx,kky,kkz,step,delta,norm,phase
+  double complex::cnk(5),ione
+ 
+  character*16,allocatable::filename(:)
+  character*12::a12,b12
+
+  integer,allocatable::lproj(:),mproj(:),nlist_computed(:,:)
+
+  double precision,allocatable::center(:,:),rr(:),Rnl(:),Rnl_intp(:,:),rad_scale(:),orb_scale(:)
+  double precision,allocatable::YP(:),YPP(:),YPPP(:),dirproj(:,:)
+  double complex,allocatable::cnk_amn(:,:,:,:,:),Rlm(:,:),cphase(:),overlap_mmn(:,:,:,:)
+
+!---------------------------------------------------------------------
+  integer::n_elem,G0(3),ib1,ib2,jb1,jb2,irk1,irk2,nnkp,nbands,nntot,nrk_fbz
+  integer::gmax_all(3),grot(3),mtrans,ntrans
+  integer,allocatable::gmax_k_local(:,:),gmax_k_global(:,:),ind_rot_g(:,:),ind_rot_inv_g(:,:)
+  integer,allocatable::g_to_ind(:,:,:),ind_to_g(:,:),rotated_g(:,:)
+
+  double complex,allocatable::rotated_Cg(:)
+
+  double complex::overlap_sum
+  
+  myproc=k_gspace(1)%myproc
+  ione=(0.d0,1.d0)
+
+! figure out g-vectors info for all k-points
+
+  nrk=kpoints%nrk
+  nrk_fbz=kpoints%nrk_fbz
+
+  allocate(gmax_k_local(3,nrk))
+  allocate(gmax_k_global(3,nrk))
+
+  do irk=1,nrk
+  do jj=1,3
+     gmax_k_local(jj,irk)=maxval(abs(k_gspace(irk)%gvec(jj,:)))
+  end do
+  end do
+
+
+m4_ifdef([MPI],[
+    call mpi_barrier(MPI_COMM_WORLD, ierr)
+
+! gmax
+    do irk=1,nrk
+    do jj=1,3
+       call mpi_allreduce(gmax_k_local(jj,irk), gmax_k_global(jj,irk),1, &
+         MPI_INTEGER4, MPI_MAX, MPI_COMM_WORLD, ierr)
+    end do
+    end do
+
+! make the array big enough in case wavefunctions
+! are shifted by a few reciprocal lattice
+
+    do jj=1,3
+    gmax_all(jj)=MAXVAL(gmax_k_global(jj,:))+3
+    end do
+!    write(*,*) "gmax_all",gmax_all
+    
+
+! build a list of rotated G vectors
+
+! if the system has symmetry operations other than identity
+
+    i=(2*gmax_all(1)+1)*(2*gmax_all(2)+1)*(2*gmax_all(3)+1)
+
+    if(syms%mtrans.ge.1) then
+    allocate(ind_rot_g(i,syms%mtrans))
+    allocate(ind_rot_inv_g(i,syms%mtrans))
+
+    end if
+
+
+    allocate(g_to_ind(2*gmax_all(1)+1,2*gmax_all(2)+1,2*gmax_all(3)+1))
+    allocate(ind_to_g(3,i))
+
+! create indices for g vectors
+
+    nx=2*gmax_all(1)+1
+    ny=2*gmax_all(2)+1
+
+    do kk=1,2*gmax_all(3)+1
+    do jj=1,2*gmax_all(2)+1
+    do ii=1,2*gmax_all(1)+1
+       g_to_ind(ii,jj,kk)=ii+(jj-1)*nx+(kk-1)*nx*ny
+    end do
+    end do
+    end do
+
+   do ii=1,(2*gmax_all(1)+1)*(2*gmax_all(2)+1)*(2*gmax_all(3)+1)
+      ind_to_g(3,ii)= ii/(nx*ny)+1
+      ind_to_g(2,ii)= (ii-(ind_to_g(3,ii)-1)*nx*ny)/nx+1
+      ind_to_g(1,ii)= ii-(ind_to_g(2,ii)-1)*nx-(ind_to_g(3,ii)-1)*nx*ny
+      ind_to_g(3,ii)=ind_to_g(3,ii)-gmax_all(3)-1
+      ind_to_g(2,ii)=ind_to_g(2,ii)-gmax_all(2)-1
+      ind_to_g(1,ii)=ind_to_g(1,ii)-gmax_all(1)-1
+   end do
+
+!--------------------------
+! C_G(k)=C_(G-G0)(k+G0)
+
+! C_G(-k)=C^*_G(k)
+
+! C_G(Sk)=C_S^-1G(k)EXP(-iS^-1GTs)
+! grot: S G and S^-1 G
+
+
+
+    if (syms%mtrans.ge.1) then
+    do i=1,syms%mtrans
+
+       mm=syms%ind_inv(i)
+       nn=syms%ind_mtrans(i)
+
+       do kk=-gmax_all(3),gmax_all(3)
+
+          do jj=-gmax_all(2),gmax_all(2)
+
+             do ii=-gmax_all(1),gmax_all(1)
+
+                ix=ii+gmax_all(1)+1
+                iy=jj+gmax_all(2)+1
+                iz=kk+gmax_all(3)+1
+
+                ll=ix+(iy-1)*nx+(iz-1)*nx*ny
+
+                grot(1)=syms%mtrx(1, 1, mm)*ii+syms%mtrx(1, 2, mm)*jj+syms%mtrx(1, 3, mm) * kk
+                grot(2)=syms%mtrx(2, 1, mm)*ii+syms%mtrx(2, 2, mm)*jj+syms%mtrx(2, 3, mm) * kk
+                grot(3)=syms%mtrx(3, 1, mm)*ii+syms%mtrx(3, 2, mm)*jj+syms%mtrx(3, 3, mm) * kk
+
+                ix=grot(1)+gmax_all(1)+1
+                iy=grot(2)+gmax_all(2)+1
+                iz=grot(3)+gmax_all(3)+1
+
+                ind_rot_inv_g(ll,i)=ix+(iy-1)*nx+(iz-1)*nx*ny
+
+                grot(1)=syms%mtrx(1, 1, nn)*ii+syms%mtrx(1, 2, nn)*jj+syms%mtrx(1, 3, nn) * kk
+                grot(2)=syms%mtrx(2, 1, nn)*ii+syms%mtrx(2, 2, nn)*jj+syms%mtrx(2, 3, nn) * kk
+                grot(3)=syms%mtrx(3, 1, nn)*ii+syms%mtrx(3, 2, nn)*jj+syms%mtrx(3, 3, nn) * kk
+
+                ix=grot(1)+gmax_all(1)+1
+                iy=grot(2)+gmax_all(2)+1
+                iz=grot(3)+gmax_all(3)+1
+
+                ind_rot_g(ll,i)=ix+(iy-1)*nx+(iz-1)*nx*ny
+
+             end do
+          end do
+       end do
+
+    end do
+
+    end if     
+])
+
+! radial integration grid info
+  proj_flag=1
+  ngrid1=150
+  step=0.020
+  ns=crys%nspin
+
+  allocate(Rlm(ngrid1,5))
+
+  open(209,file="wannier.inp")
+
+! read in information 
+
+  
+  read(209,*) nband0,nband1
+  read(209,*) ncenter
+
+  ndim=nband1-nband0
+
+!-------------------------------------------------------
+! write out parameter file for compiling the wannier code
+!-------------------------------------------------------
+
+! write out band energy file
+
+   if(myproc.eq.0) then
+     open(210,file="BAND.dat")
+
+
+    do irk_fbz = 1, nrk_fbz
+       irk=abs(kpoints%kmap(irk_fbz))
+
+        do ib=nband0+1,nband1
+           write(210,*) ib-nband0,irk_fbz,bands%energy(ib,irk,1)*13.605698d0 
+        end do
+     end do
+     close(210)
+   end if
+
+  allocate(center(3,ncenter))
+  allocate(rad_scale(ncenter))
+  allocate(orb_scale(ncenter))
+  allocate(filename(ncenter))
+  allocate(lproj(ncenter))
+  allocate(mproj(ncenter))
+  allocate(dirproj(3,ncenter))
+ 
+  allocate(cnk_amn(5,ndim,nrk,ns,ncenter))
+
+  allocate(Rnl_intp(ngrid1,ncenter))
+
+  do ii=1,ncenter
+     read(209,*) (center(jj,ii),jj=1,3),lproj(ii),mproj(ii),(dirproj(jj,ii),jj=1,3)
+ 
+     norm=dsqrt(DOT_PRODUCT(dirproj(:,ii),dirproj(:,ii)))
+     dirproj(:,ii)=dirproj(:,ii)/norm
+  end do
+
+  do ii=1,ncenter
+     read(209,*) a16
+     filename(ii)=TRIM(a16)
+  end do
+
+  do ii=1,ncenter
+     read(209,*) rad_scale(ii),orb_scale(ii)
+  end do
+
+  close(209)
+
+  bands%nband1=nband1
+  bands%nband0=nband0
+
+!--------------------------------------------
+! preparing initial guess of wannier orbitals
+
+  do j=1,ncenter
+
+     open(209,file=filename(j))
+
+     read(209,*) ngrid2
+     allocate(rr(ngrid2))
+     allocate(Rnl(ngrid2))
+
+     do ii=1,ngrid2
+        read(209,*) rr(ii),Rnl(ii)
+     end do
+
+! interpolate onto regular grid
+
+     rr(:)=rr(:)*rad_scale(j)
+     Rnl(:)=Rnl(:)*orb_scale(j)
+
+     allocate(YP(ngrid2))
+     allocate(YPP(ngrid2))
+     allocate(YPPP(ngrid2))
+
+     call SPCOEF(ngrid2,rr,Rnl,YP,YPP,YPPP,ier)
+
+     do ii=1,ngrid1
+        ind=LEFT(ngrid2,rr,ii*step,ier)
+        delta=ii*step-rr(ind)
+        Rnl_intp(ii,j)=Rnl(ind)+(YP(ind)+(YPP(ind)+YPPP(ind)*delta)*delta)*delta
+     end do
+
+     deallocate(YP)
+     deallocate(YPP)
+     deallocate(YPPP)
+     deallocate(rr)
+     deallocate(Rnl)
+     close(209)
+
+  end do
+
+!------------------------
+
+  if(myproc.eq.0) then
+  open(209,file="wannier.amn")
+  write(209,*) "paratec interface with wannier90 by P. Zhang"
+  write(209,*) ndim,nrk_fbz,ncenter
+  end if
+
+  if(kpoints%reduced) then
+     allocate(rotated_g(3,(2*gmax_all(1)+1)*(2*gmax_all(2)+1)*(2*gmax_all(3)+1)))
+     allocate(rotated_Cg((2*gmax_all(1)+1)*(2*gmax_all(2)+1)*(2*gmax_all(3)+1)))
+     allocate(cphase((2*gmax_all(1)+1)*(2*gmax_all(2)+1)*(2*gmax_all(3)+1)))
+  end if
+
+
+  do irk_fbz = 1, nrk_fbz
+
+     if(.not.kpoints%reduced) then
+       irot=0
+       irk=irk_fbz
+     else
+
+       irot=1
+       irk=kpoints%kmap(irk_fbz)
+
+       if(irk.lt.0) then 
+          irk=-irk
+          irot=0
+       end if
+     end if
+
+     ng=k_gspace(irk)%length
+
+     kkx=kpoints%rk_fbz(1,irk_fbz)
+     kky=kpoints%rk_fbz(2,irk_fbz)
+     kkz=kpoints%rk_fbz(3,irk_fbz)
+
+! figure out extra phase
+! calculated rotated G vectors G'=SG - G0
+
+     if (irot.eq.1) then
+           mtrans=syms%ind_ktrans(abs(kpoints%ind_symtr(irk_fbz)))
+           ntrans=syms%ind_inv(mtrans)
+
+        do i=1,ng
+
+           ii=k_gspace(irk)%gvec(1,i)
+           jj=k_gspace(irk)%gvec(2,i)
+           kk=k_gspace(irk)%gvec(3,i)
+
+           phase=syms%tnp(1,ntrans)*ii+ syms%tnp(2,ntrans)*jj+ syms%tnp(3,ntrans)*kk
+           cphase(i)=DCMPLX(dcos(phase),dsin(phase))
+
+           ii=ii+gmax_all(1)+1
+           jj=jj+gmax_all(2)+1
+           kk=kk+gmax_all(3)+1
+
+           ll=ind_rot_g(g_to_ind(ii,jj,kk),mtrans)
+
+! recover g and shift g by G0
+
+           rotated_g(:,i)= ind_to_g(:,ll)-kpoints%ind_G0(:,irk_fbz)
+
+        end do
+
+     end if
+
+  do ib = nband0+1, nband1     !do not count semicore s and p orbitals
+
+     do is = 1, crys%nspin
+
+! generate wavefunctions on-the-run. 
+! This is not the most elegant way, but ...
+
+        if(irot.eq.1) then
+
+! SK=K1-G0; S: symmetry operation
+! K is in irreducible zone
+! K1 is in the BZ, and G0 is the translation vector that
+! brings SK into BZ
+
+! C(SG-G0)(K1)=C(G)(K) EXP(iG T_S-1)
+! S-1: inverse of S
+! T_S-1: fractional translation associated with S-1 
+
+        do i=1,ng
+           rotated_Cg(i)=wavefn%data((ib-1)*ng+i,irk,is)*cphase(i)
+        end do
+           
+        end if
+
+     do j=1, ncenter
+
+     tau=matmul(crys%avec,center(:,j))
+
+!     if ((myproc.eq.0).and.(irk_fbz.eq.1)) write(9,"(a8,2i5,3f15.10)") "center",j,lproj(j),dirproj(:,j)
+!     if ((myproc.eq.0).and.(irk_fbz.eq.1)) write(9,"(3f15.10)") tau
+
+! do angular momemtum decomposition
+
+             if((lproj(j).eq.2).or.(lproj(j).eq.7)) then
+
+             if(irot.eq.1) then
+             call angular_wfnpz_dw(rotated_Cg,ng,rotated_g, tau,rc,crys%bvec,&
+                     kkx,kky,kkz,crys%vcell,myproc,ngrid1,step,Rnl_intp(:,j), cnk,Rlm,proj_flag)
+
+             else
+             call angular_wfnpz_dw(wavefn%data((ib-1)*ng+1,irk,is),  &
+                                   ng,k_gspace(irk)%gvec, tau,rc,crys%bvec,&
+                     kkx,kky,kkz,crys%vcell,myproc,ngrid1,step,Rnl_intp(:,j), &
+                     cnk,Rlm,proj_flag)
+             end if
+
+
+! Option 2: complex spherical harmonic, L=2
+
+             if(lproj(j).eq.2) then
+                 if(myproc.eq.0) write(209,111) ib-nband0,j,irk_fbz, &
+                 REAL(DCONJG(cnk(mproj(j)))), &
+                 IMAG(DCONJG(cnk(mproj(j))))
+             else
+
+! option 7: real spherical harmonic with L=2
+!
+! dz^2,d(x^2-y^2),dxy,dyz,dzx
+
+! z^2: 1
+! x^2-y^2: 2
+! xy,yz,zx: 3, 4, 5
+
+                 if (mproj(j).eq.1) then
+                 if(myproc.eq.0) write(209,111) ib-nband0,j,irk_fbz, &
+                 REAL(DCONJG(cnk(3))), &
+                 IMAG(DCONJG(cnk(3)))
+                 end if
+
+                 if (mproj(j).eq.2) then
+                 if(myproc.eq.0) write(209,111) ib-nband0,j,irk_fbz, &
+                    REAL(DCONJG(cnk(1)+DCONJG(cnk(1)))/dsqrt(2.d0)), &
+                    IMAG(DCONJG(cnk(1)+DCONJG(cnk(1)))/dsqrt(2.d0))
+                 end if
+
+                 if (mproj(j).eq.3) then
+                 if(myproc.eq.0) write(209,111) ib-nband0,j,irk_fbz, &
+                    REAL(ione*DCONJG(cnk(1)-DCONJG(cnk(1)))/dsqrt(2.d0)), &
+                    IMAG(ione*DCONJG(cnk(1)-DCONJG(cnk(1)))/dsqrt(2.d0))
+                 end if
+
+                 if (mproj(j).eq.4) then
+                 if(myproc.eq.0) write(209,111) ib-nband0,j,irk_fbz, &
+                    REAL(DCONJG(cnk(2)+DCONJG(cnk(2)))/dsqrt(2.d0)), &
+                    IMAG(DCONJG(cnk(2)+DCONJG(cnk(2)))/dsqrt(2.d0))
+                 end if
+
+                 if (mproj(j).eq.5) then
+                 if(myproc.eq.0) write(209,111) ib-nband0,j,irk_fbz, &
+                    REAL(ione*DCONJG(cnk(2)-DCONJG(cnk(2)))/dsqrt(2.d0)), &
+                    IMAG(ione*DCONJG(cnk(2)-DCONJG(cnk(2)))/dsqrt(2.d0))
+                 end if
+
+             end if
+
+             end if
+    
+             if((lproj(j).eq.1).or.(lproj(j).eq.4).or.(lproj(j).eq.5).or.(lproj(j).eq.6)) then
+
+
+             if(irot.eq.1) then
+             call angular_wfnpz_pw(rotated_Cg,ng,rotated_g, tau,rc,crys%bvec,&
+                     kkx,kky,kkz,crys%vcell,myproc,ngrid1,step,Rnl_intp(:,j), cnk,Rlm,proj_flag)
+             else
+
+             call angular_wfnpz_pw(wavefn%data((ib-1)*ng+1,irk,is)  &
+                    ,ng,k_gspace(irk)%gvec, tau,rc,crys%bvec,&
+                     kkx,kky,kkz,crys%vcell,myproc,ngrid1,step,Rnl_intp(:,j), &
+                     cnk,Rlm,proj_flag)
+             end if
+
+! option 1: compex spherical harmoincs, L=1
+              
+             if(lproj(j).eq.1) then
+             if(myproc.eq.0) write(209,111) ib-nband0,j,irk_fbz, &
+              REAL(DCONJG(cnk(mproj(j)))), &
+              IMAG(DCONJG(cnk(mproj(j))))
+             end if
+
+! option 6: real spherical harmonic L=1
+
+             if(lproj(j).eq.6) then
+
+! x: 1,y: 2,z: 3
+
+             if(mproj(j).eq.3) then
+             if(myproc.eq.0) write(209,111) ib-nband0,j,irk_fbz, &
+             REAL(DCONJG(cnk(2))), &
+             IMAG(DCONJG(cnk(2)))
+             end if
+
+             if(mproj(j).eq.1) then
+             if(myproc.eq.0) write(209,111) ib-nband0,j,irk_fbz, &
+               REAL(DCONJG(cnk(1)+DCONJG(cnk(1)))/dsqrt(2.d0)), &
+               IMAG(DCONJG(cnk(1)+DCONJG(cnk(1)))/dsqrt(2.d0))
+             end if
+
+             if(mproj(j).eq.2) then
+             if(myproc.eq.0) write(209,111) ib-nband0,j,irk_fbz, &
+               REAL(ione*DCONJG(cnk(1)-DCONJG(cnk(1)))/dsqrt(2.d0)), &
+               IMAG(ione*DCONJG(cnk(1)-DCONJG(cnk(1)))/dsqrt(2.d0))
+             end if
+
+             end if
+
+
+             if((lproj(j).eq.4).or.(lproj(j).eq.5)) then
+! option 4
+! lproj=4: sp3 decomposition: 1/2*s+sqrt(3)/2*pz
+
+! option 5: define a z direction, and decompose onto pz
+
+! define the z axis
+! normalize the direction
+
+             cnk_amn(1,ib-nband0,irk,is,j)=dirproj(1,j)*(cnk(1)-cnk(3))/dsqrt(2.d0)- &
+                                            dirproj(2,j)*(cnk(1)+cnk(3))*ione/dsqrt(2.d0) + &
+                                            dirproj(3,j)*cnk(2) 
+             if (lproj(j).eq.5) then
+                 if(myproc.eq.0) write(209,111) ib-nband0,j,irk_fbz, &
+                 REAL(DCONJG(cnk_amn(1,ib-nband0,irk,is,j))), &
+                 IMAG(DCONJG(cnk_amn(1,ib-nband0,irk,is,j)))
+             else
+
+             if(irot.eq.1) then
+             call angular_wfnpz_sw(rotated_Cg,ng,rotated_g, tau,rc,crys%bvec,&
+                     kkx,kky,kkz,crys%vcell,myproc,ngrid1,step,Rnl_intp(:,j), cnk,Rlm,proj_flag)
+             else
+            
+             call angular_wfnpz_sw(wavefn%data((ib-1)*ng+1,irk,is)  &
+                    ,ng,k_gspace(irk)%gvec, tau,rc,crys%bvec,&
+                     kkx,kky,kkz,crys%vcell,myproc,ngrid1,step,Rnl_intp(:,j), &
+                     cnk,Rlm,proj_flag)
+             end if
+             
+             cnk_amn(1,ib-nband0,irk,is,j)=0.5d0*dsqrt(3.d0)* cnk_amn(1,ib-nband0,irk,is,j)+ &
+                                            0.5d0*cnk(1)
+ 
+             if(myproc.eq.0) write(209,111) ib-nband0,j,irk_fbz, &
+                REAL(DCONJG(cnk_amn(1,ib-nband0,irk,is,j))), &
+                IMAG(DCONJG(cnk_amn(1,ib-nband0,irk,is,j)))
+
+             end if
+
+             end if
+             end if
+
+             if(lproj(j).eq.0) then
+
+             if(irot.eq.1) then
+             call angular_wfnpz_sw(rotated_Cg,ng,rotated_g, tau,rc,crys%bvec,&
+                     kkx,kky,kkz,crys%vcell,myproc,ngrid1,step,Rnl_intp(:,j), cnk,Rlm,proj_flag)
+             else
+
+
+             call angular_wfnpz_sw(wavefn%data((ib-1)*ng+1,irk,is)  &
+                    ,ng,k_gspace(irk)%gvec, tau,rc,crys%bvec,&
+                     kkx,kky,kkz,crys%vcell,myproc,ngrid1,step,Rnl_intp(:,j), &
+                     cnk,Rlm,proj_flag)
+
+             end if
+
+             cnk_amn(1,ib-nband0,irk,is,j)=cnk(1)
+             if(myproc.eq.0) write(209,111) ib-nband0,j,irk_fbz, &
+               REAL(DCONJG(cnk(1))), &
+               IMAG(DCONJG(cnk(1)))
+             end if
+
+             call myflush(209)
+
+             end do ! center
+          end do  ! spin
+      end do ! ib
+  end do ! ifk
+
+ 111 format(3i6,3x,e20.12,e20.12)
+
+   deallocate(center)
+   deallocate(filename)
+   deallocate(lproj)
+   deallocate(cnk_amn)
+   deallocate(Rnl_intp)
+   deallocate(Rlm)
+
+   close(209)
+
+!--------------------------------------------------
+! now read in information for calculating needed
+! overlap matrix elements.
+
+! this information will be generated within paratec
+! in a later version
+!--------------------------------------------------
+
+   open(209,file="wannier.nnkp")
+
+   if(myproc.eq.0) then
+   open(210,file="wannier.mmn")
+   end if
+
+!   read(209,*) nnkp,nbands,nntot
+!   if(nnkp.ne.(kpoints%grid(1)*kpoints%grid(2)*kpoints%grid(3))) then
+!     write(*,*) "k-point grids do not match", &
+!           nnkp,kpoints%grid(1)*kpoints%grid(2)*kpoints%grid(3)
+!     call myflush(6)
+!     stop
+!   end if
+!   if(myproc.eq.0) write(210,*) nntot*nbands*nbands/2
+!   allocate(nlist_computed(nnkp,nnkp))
+!   nlist_computed=0
+
+   nnkp=kpoints%grid(1)*kpoints%grid(2)*kpoints%grid(3)
+
+! reads k-point pairs for which the overlap is to be computed
+
+   i=1
+   b12="begin nnkpts"
+
+   do while (i.eq.1)
+      read(209,211) a12
+      if(a12.eq.b12) goto 112
+   end do
+ 211 format(a12)
+ 112 continue
+    
+   read(209,*) n_neig
+
+   if(myproc.eq.0) then
+        write(210,*) "paratec interface with wannier90 by P. Zhang"
+        write(210,*) nband1-nband0,nnkp,n_neig
+   end if
+
+   do i=1,nnkp*n_neig
+         read(209,*) irk1,irk2,G0(1),G0(2),G0(3)
+
+! the wannier code needs to be modified since <i|k>=<k|i>^*
+! for the moment, I will calculate all overlaps
+
+!         if(nlist_computed(irk1,irk2).eq.0) then
+
+         if(myproc.eq.0) write(210,*) irk1,irk2,G0(1),G0(2),G0(3)
+
+         do ib1=nband0+1, nband1
+         do ib2=nband0+1, nband1
+
+         call overlap(irk1,irk2,ib1,ib2,G0,kpoints,k_gspace, &
+                      wavefn,overlap_sum,syms,ind_rot_g,ind_rot_inv_g,gmax_all,g_to_ind,ind_to_g)
+
+         if(myproc.eq.0) write(210,*) REAL(overlap_sum),IMAG(overlap_sum)
+
+         end do
+         end do
+!         nlist_computed(irk1,irk2)=1
+!         nlist_computed(irk2,irk1)=1
+!         end if
+
+   end do
+   close(209)
+ 
+   if(myproc.eq.0) close(210)
+
+   return
+   end subroutine wannier
+

@@ -1,0 +1,297 @@
+!
+subroutine symmetrize_tensor_global(ioutput, tens, syms, gs)
+  !
+  include 'use.h'
+  implicit none             ! implicit? Just say no!
+m4_ifdef([MPI],[include 'mpif.h'])
+  include 'interface.h'
+m4_ifdef([CRAY],[m4_define([MPI_INTEGER4],[MPI_INTEGER])])
+m4_ifdef([INT4],[m4_define([MPI_INTEGER4],[MPI_INTEGER])])
+  !
+  !     INPUT:
+  !     -----
+  !
+  type(symmetry), intent(in) :: &
+                  syms      ! symmetry operations
+  type(parallel_gspace), intent(in) :: &
+       gs                   ! the gspace corresponding to the data
+  integer, intent(in) :: &
+       ioutput              ! flag for timing printout
+  !
+  !     INPUT/OUTPUT:
+  !     ------------
+  !
+  complex(dp), intent(inout) :: &
+       tens(gs%length, 3, 3)  ! the tensor quantity to be symmetrized
+  !
+  !     DESCRIPTION:
+  !     -----------
+  !
+  !     Symmetrizes the tensor field tens in gspace across multiple 
+  !     processors.
+  !     
+  !     1996 Bernd Pfrommer
+  !
+  !
+  !     ---------------- local variables -----------------------------
+  !
+  integer :: &
+       i, j, ierr, &        ! dummies
+       ig, &                ! gvector index
+       ivec, &              ! index of found gvector
+       iproc, &             ! sending processor index
+       il, &                ! list of gvec counter
+       llen, &              ! length of list of gvecs
+       n, &                 ! counter for symmetry operations
+       mylen, &             ! number of gvecs here
+       mylist(2, 48), &     ! first is index of gvec, second index in glist
+       oplist(48), &        ! list of operations
+       gtrans(3), &         ! transformed gvector
+       glist(3, 48)         ! list of gvectors
+  real(dp) :: t0, alf(3, 3), alfm1(3, 3)
+  complex(dp) :: &
+       phase, &             ! the phase factor exp(-iG*tau)
+       symtens(3, 3), &
+       t(3, 3, 48), &
+       tr(3, 3, 48) 
+  logical :: &
+       inew, &              ! flag for new gvector found
+       issym(gs%length)     ! array to indicate which gvecs have been symm.
+  integer, external :: findvec
+  real(dp), external :: gimmetime
+
+  t0 = gimmetime()
+
+  if (syms%ntrans == 1) return ! need not symmetrize
+
+  issym= .false.             ! nothing is symmetrized so far
+
+  do iproc = 0, gs%nproc - 1    ! loop over all procs
+     if (iproc == gs%myproc) then ! i'm symmetrizing
+        do ig = 1, gs%length
+           if (.not. issym(ig)) then ! has not been treated yet
+              t = 0
+              t(:,:, 1) = tens(ig, :,:)
+              issym(ig)= .true.
+              !     generate a list of symmetry-related gvectors by 
+              !     acting on the g-vector with the symmetry operations
+              !     
+              llen = 0 
+              do n = 1, syms%ntrans
+                 gtrans = matmul(syms%mtrx(:,:, n), gs%gvec(:, ig))
+                 inew = .true.
+                 do i = 1, llen ! check if already in the list
+                    if (glist(1, i) == gtrans(1) .and. &
+                         glist(2, i) == gtrans(2) .and. &
+                         glist(3, i) == gtrans(3)) then
+                       inew = .false. ! is already in list
+                       exit
+                    end if
+                 end do
+                 if(inew) then ! is new, add to list
+                    llen = llen + 1
+                    glist(:, llen) = gtrans
+                    oplist(llen) = n
+                 end if
+              end do
+              !                  write(9,*)  'glist for g=', ig
+              !                  do il=1,llen
+              !                     write(9,*) il,oplist(il), glist(:,il)
+              !                  end do
+              !
+              !                 communicate with other processors if there are
+              !                 other vectors in the list.
+              !
+              glist(1, 1) = llen ! abuse temporarily for length info
+m4_ifdef([MPI],[
+              if (llen > 1) call mpi_bcast(glist(1, 1), 3 * 48, &
+                   MPI_INTEGER4, iproc, MPI_COMM_WORLD, ierr)
+])
+              glist(:, 1) = gs%gvec(:, ig) ! put the original back in place
+              !
+              !    gather the tensor components for symmetrization
+              !
+              !
+              !    first look in my own backyard if I have one of the 
+              !    gvectors 
+              !
+              mylen = 1
+              mylist(1, mylen) = ig
+              mylist(2, mylen) = 1
+
+              do i = 2, llen
+                 ivec = findvec(glist(1, i), gs)
+                 if (ivec > 0) then
+                    t(:,:, i) = tens(ivec, :,:)
+                    issym(ivec) = .true.
+                    mylen = mylen + 1
+                    mylist(1, mylen) = ivec
+                    mylist(2, mylen) = i 
+                 end if
+              end do
+              !                  write(9,*)  'mylist:'
+              !                  do il=1,mylen
+              !                     write(9,*) il,mylist(1,il), mylist(2,il)
+              !                  end do
+              !     
+              !                 gather the data from the rest of the world
+              !
+              tr = t
+m4_ifdef([MPI],[
+              if (llen > 1) call mpi_reduce(t(1, 1, 1), tr(1, 1, 1), &
+                   3 * 3 * llen, MPI_DOUBLE_COMPLEX, MPI_SUM, &
+                   iproc, MPI_COMM_WORLD, ierr) 
+])
+              ! 
+              !                now symmetrize 
+              !
+              !                  write(9,*)  'unsymmetrized tensors:'
+              !                  do il=1,llen
+              !                     write(9,*)  il, ':'
+              !                     write(9,'(6g12.5)') tr(:,:,il)
+              !                  end do
+              symtens = 0
+              do n = 1, syms%ntrans
+                 gtrans = matmul(syms%mtrx(:,:, n), gs%gvec(:, ig))
+                 phase = exp(cmplx(dzero, done * dot_product(real(gtrans, dp), &
+                      syms%tnp(:, n)), dp))
+                 !
+                 !                       find place in the list
+                 !
+                 do il = 1, llen
+                    if (glist(1, il) == gtrans(1) .and. &
+                         glist(2, il) == gtrans(2) .and. &
+                         glist(3, il) == gtrans(3)) exit
+                 end do
+                 if (il == llen + 1) then
+                    write(9, *) 'error!'
+                    call mystop
+                 end if
+                 do i = 1, 3
+                    alf(i, :) = syms%rsymmat(i, :, n)
+                    alfm1(:, i) = syms%rsymmat(i, :, n)
+                 end do
+                 !           write(9,*) n, phase, syms%tnp(:,n), gs%gvec(:,ig)
+                 !           write(9,'(6g12.5)') matmul(alfm1,matmul(tr(:,:&
+                 !             ,il),alf))*phase
+
+                 symtens = symtens + matmul(alfm1, matmul(tr(:,:, il), alf)) * &
+                      phase
+              end do
+              symtens = symtens / real(syms%ntrans, dp)
+
+              !                  write(9,*)  'prototype symmetrized tensor:'
+              !                  write(9,'(6g12.5)') symtens
+
+              !
+              !                 from the symmetrized tensor at G,
+              !                 compute rotated tensors
+              !
+              do il = 1, llen
+                 n = oplist(il)
+                 do i = 1, 3
+                    alf(i, :) = syms%rsymmat(i, :, n)
+                    alfm1(i, :) = syms%rsymmat(:, i, n)
+                 end do
+                 phase = exp(cmplx(dzero, -dot_product(real(glist(:, il), &
+                      dp), syms%tnp(:, n)), dp)) 
+                 t(:,:, il) = matmul(alf, matmul(symtens, alfm1)) * phase
+              end do
+
+              !                  write(9,*)  'symmetrized tensors:'
+              !                  do il=1,llen
+              !                     write(9,*)  il, ':'
+              !                     write(9,'(6g12.5)') t(:,:,il)
+              !                  end do
+              !
+              !                 ship back to the rest of the world
+              !
+m4_ifdef([MPI],[
+              if (llen > 1) call mpi_bcast(t, 9 * llen, MPI_DOUBLE_COMPLEX, &
+                   iproc, MPI_COMM_WORLD, ierr)])
+              !
+              !                 put it into right place here
+              !
+
+              do i = 1, mylen
+                 tens(mylist(1, i), :,:) = t(:,:, mylist(2, i))
+                 !                     write(9,*) 'gvec=', mylist(1,i)
+              end do
+           end if           ! endif not symmetrized
+        end do              ! end of loop over all gvectors
+        !
+        !           Signal the other processors that i'm done
+        !
+        glist(1, 1) = -1234567
+m4_ifdef([MPI],[
+        call mpi_bcast(glist(1, 1), 3 * 48, &
+             MPI_INTEGER4, iproc, MPI_COMM_WORLD, ierr)])
+        !
+        !           signal other processors that i'm done with symmetrizing
+        !
+     else                   ! i'm responding
+        !
+        !           wait for the search requests to come in
+        !           
+        do while (.true.)
+m4_ifdef([MPI],[
+           call mpi_bcast(glist(1, 1), 3 * 48, &
+                MPI_INTEGER4, iproc, MPI_COMM_WORLD, ierr)])
+           llen = glist(1, 1)
+           !               write(9,*) 'received list of length', llen
+           !               call myflush(9)
+           if (llen == -1234567) exit ! last search request received
+           !
+           !              look and see if I have the g-vector
+           !
+           t = 0
+           mylen = 0
+           do i = 2, llen
+              ivec = findvec(glist(1, i), gs)
+              if (ivec > 0) then  ! i have it
+                 t(:,:, i) = tens(ivec, :,:)
+                 issym(ivec) = .true.
+                 mylen = mylen + 1
+                 mylist(1, mylen) = ivec
+                 mylist(2, mylen) = i 
+              end if
+           end do
+           !                     
+           !              send the local tensor components back to the root
+           !
+m4_ifdef([MPI],[
+           call mpi_reduce(t(1, 1, 1), tr(1, 1, 1), 3 * 3 * llen, &
+                MPI_DOUBLE_COMPLEX, MPI_SUM,iproc, MPI_COMM_WORLD,ierr)])
+           !
+           !              get back the symmetrized stuff from root
+           !
+m4_ifdef([MPI],[
+           call mpi_bcast(t, 9 * llen, MPI_DOUBLE_COMPLEX, iproc, &
+                MPI_COMM_WORLD, ierr)])
+           !
+           !              put it into right place here
+           !
+           do i = 1, mylen
+              tens(mylist(1, i), :,:) = t(:,:, mylist(2, i))
+           end do
+        end do
+     end if
+  end do                    ! loop over all processors
+
+  !      write(9,*)  'symmetrized tensors:'
+
+  !      do ig=1, gs%length
+  !         write(9,'(i6,/3(3g12.5/))') ig, dble(tens(ig,:,:))
+  !      end do
+
+  if (iand(ioutput, 8) == 8) then
+     write(9, 100) gimmetime() - t0
+     call myflush(9)
+  end if
+
+  return
+
+100 format(' TIME FOR TENSOR GLOBAL SYMMETRIZATION:', f12.3)
+
+end subroutine symmetrize_tensor_global
+

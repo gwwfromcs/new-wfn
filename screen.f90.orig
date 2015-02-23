@@ -1,0 +1,238 @@
+!
+subroutine screen(iscr, lrcd, gs, crys, ffts, energs, pwp, vion, &
+     denv, denc, vin, den, chdr)
+
+  use all_to_all_module  
+  include 'use.h'  
+  implicit none    ! implicit ? ....
+  include 'interface.h'  
+  include 'all_to_all.h'  
+  include 'flibcalls.ph'  
+  !
+  !     ---------------- arguments ---------------------------------------
+  !     INPUT:
+  !     -----
+  !      iscr           control parameter.
+  !                  1  use hartree screening.
+  !                  2  use fermi thomas screening.
+  !                  3  screen with dielectric function read from
+  !                     tape10.
+  !                  4  screen with electronic charge density read
+  !                     from tape10
+  !                  5  screen with a superposition of atomic
+  !                     charge densities read from tape1, tape2...
+  !                  6  read in mixed potential from previous run
+  !
+  !      pwp%icorr   control parameter for correlation. it is
+  !                  used only if iscr = 3 or 4. for explanation
+  !                  see subroutine excorr
+  !
+  integer, intent(in) :: iscr    ! whether charge can be reused from previous
+  logical, intent(in) :: lrcd  
+  type(parallel_gspace), intent(in) :: gs
+  type(crystal), intent(in) :: crys  ! for nspin, ztot
+  type(fft_struc), intent(in) :: ffts  
+  type(pw_parameter), intent(in) :: pwp  
+  type(complex_gspace_array), intent(in) :: &
+       denv, &                   ! the initial valence charge density
+       denc                      ! the core charge density
+  !
+  !     INPUT/OUTPUT:
+  !     ------------
+  type(complex_gspace_array), intent(inout) :: &
+       vion                      ! the ionic potential, screened on outpu
+  !
+  !     OUTPUT:
+  !     ------
+  !
+  type(energy), intent(out) :: energs  
+  type(complex_gspace_array), intent(out) :: &
+       vin, &                    ! the input potential on output
+       den                       ! the valence charge density on output
+  !
+  !     WORK:
+  !     ----
+  !
+  type(complex_rspace_array) :: &
+       chdr                      ! a work array for the realspace charge
+  !
+  !      screens the ionic potential on lattice
+  !      it uses the subroutines velect and excorr to convert
+  !      charge density into potential.
+  !      adapted from sverre froyen plane wave program
+  !      written june 1 1987. jlm
+  !
+  !     parallel version 1995 Bernd Pfrommer
+  !     --------------- local variables ----------------------------------
+  !
+  character(len=2) :: scr  
+  character(len=9) :: bdate  
+  character(len=8) :: btime  
+  character(len=10) :: ititle(7), iray(6)  
+  character(len=20) :: title  
+  real(dp), parameter :: big = 1.0d10
+  real(dp) :: qtf2, qf, x, x2, gx, fac, vinreal, vinimag, &
+       exc                                     ! exc is discarded here
+  integer :: i, ipr, ngr, ngmin, ierr, is, nspin, nv  
+  logical :: isp  
+  !
+  !     -------------- here begins the code itself -----------------------
+  !
+  call create_gspace_array(vin, gs%length, 1, crys%nspin)  
+  call create_rspace_array(chdr, ffts%r_size, 1, crys%nspin)  
+  if (lrcd) then  
+     write(9, 300)  
+  else  
+     call create_gspace_array(den, gs%length, 1, crys%nspin)  
+  end if
+
+  isp = .false.  
+  if (crys%nspin == 2) isp = .true.  
+
+  if (iscr == 1) then           ! --------- Hartree screening (not debugged)
+     write(9, *) ' Hartree screening is not debugged yet.'  
+     write(9, *) ' I would not use it!'  
+     qtf2 = dfour * (dthree * crys%ztot / (pi * crys%vcell))**dthird
+     qf = pi * qtf2 * dqtr
+     do i = 1, gs%length
+        x = sqrt(gs%ekin(i)) / qf  
+        if (x > dzero) then          ! skip g=0 vector
+           x2 = x * dhalf
+           gx = dhalf  
+           if (x2 == done) gx = (done - (done - x2 * x2) * log(abs((done - &
+                x2) / (done + x2))) / x) * dhalf
+           fac = done / (done + gx * qtf2 / gs%ekin(i)) - done  
+           do is = 1, crys%nspin  
+              vin%data(i, 1, is) = fac * vion%data(i, 1, is)  
+           end do
+        end if
+     end do
+  else if (iscr == 2) then     ! ----- Thomas Fermi screening (not debugged)
+     write(9, *) ' Thomas-Fermi screening is not debugged yet.'  
+     write(9, *) ' I would not use it!'  
+
+     qtf2 = dfour * (dthree * crys%ztot / (pi * crys%vcell))**dthird
+     do i = 1, gs%length  
+        if (gs%ekin(i) > dzero) then  
+           fac = done / (done + qtf2 / gs%ekin(i)) - done  
+           do is = 1, crys%nspin  
+              vin%data(i, 1, is) = fac * vion%data(i, 1, is)  
+           end do
+        end if
+     end do
+  else                 ! -------- screen with charge or dielectric function
+     write(9, 100)  
+     ! screen with atomic charge
+     if (iscr == 5 ) then 
+       if (.not. lrcd) then  
+        call mzcopy(gs%length * crys%nspin, denv%data(1, 1, 1), &
+             1, den%data(1, 1, 1), 1)
+       end if
+     end if
+
+     if (iscr == 4 .and. (.not. lrcd)) then  
+        !
+        !          read the charge density from tape.
+        !          if file empty or doesnt exist switch to atomic screening.
+        !
+        do is = 1, crys%nspin  
+           do i = 1, gs%length             ! clear valence charge density
+              den%data(i, 1, is) = zzero
+           end do
+        end do
+        nv = den%nvecs
+        nspin = den%nspin  
+        call readgsdat(1, ierr, gs, den%data(1, 1, 1), den%nvecs, &
+             nv, nspin, 'CD', 2)
+        if (nspin /= den%nspin) then  
+           write(9, 298)  
+           ierr = -1  
+        end if
+        if (nv /= den%nvecs) then  
+           write(9, 299)  
+           ierr = -1  
+        end if
+        if (ierr /= 0) then  
+           write(9, 200)  
+           call mzcopy(gs%length * crys%nspin, denv%data(1, 1, 1), &
+                1, den%data(1, 1, 1), 1)
+        else  
+           !              symmetrize the read-in charge density
+           do is = 1, crys%nspin  
+              call fourier_transform(-1, ffts, gs, den%data(1, 1, is), &
+                   chdr%data(1, 1, 1), 1)
+              do i = 1, gs%length  
+                 chdr%data(i, 1, 1) = abs(chdr%data(i, 1, 1))  
+              end do
+              call fourier_transform(1, ffts, gs, den%data(1, 1, is), &
+                   chdr%data(1, 1, 1), 1)
+              call symmetrize_scalar_global(den%data(1, 1, is), gs)
+           end do
+        end if
+     end if
+     if (iscr == 4 .or. iscr == 5) then  
+        !
+        !          compute the potential from the charge density
+        !
+        call velect(2, gs, crys, ffts, energs, pwp, denc%data(1, 1, 1), &
+             vin%data(1, 1, 1), den%data(1, 1, 1), chdr%data(1, 1, 1))
+     else if (iscr == 6) then  
+        !
+        !          read in the mixed screening potential from tape
+        !
+        nv = vin%nvecs
+        nspin = vin%nspin  
+        call readgsdat(1, ierr, gs, vin%data(1, 1, 1), vin%nvecs, &
+             nv, nspin, 'VMIX', 4)
+        if (nspin /= vin%nspin) then  
+           write(9, 398)  
+           ierr = -1  
+        end if
+        if (nv /= vin%nvecs) then  
+           write(9, 399)  
+           ierr = -1  
+        end if
+        if (ierr /= 0) then  
+           write(9, 201)  
+           !
+           !     error occurred - switch to atomic screening
+           !
+           call mzcopy(gs%length * crys%nspin, denv%data(1, 1, 1), &
+                1, den%data(1, 1, 1), 1)
+           call velect(2, gs, crys, ffts, energs, pwp, denc%data(1, 1, 1), &
+                vin%data(1, 1, 1), den%data(1, 1, 1), chdr%data(1, 1, 1))
+        end if
+     end if
+     if (iscr == 3) then  
+        write(9, *) 'velect: the dielectric function screening '// &
+             'is not implemented yet'
+          stop  
+       end if  
+    end if
+    !
+    !        add screening potential to the ionic potential.
+    !
+    !
+    do is = 1, crys%nspin  
+       do i = 1, gs%length  
+          if (gs%ekin(i) > dzero) then  
+             vion%data(i, 1, is) = vion%data(i, 1, is) + vin%data(i, 1, is)
+          end if
+       end do
+    end do
+
+    return  
+
+100 FORMAT(//,' SCREENING :',/,1X,11('-'))  
+200 format(' *** COULD NOT FIND INTACT OLD CHARGE ON DISK!', &
+         &     /' *** ATOMIC CHARGE USED TO SET UP INITIAL POTENTIAL!')
+201 format(' *** COULD NOT FIND INTACT OLD MIXED POTENTIAL ON DISK!', &
+         &     /' *** ATOMIC CHARGE USED TO SET UP INITIAL POTENTIAL!')
+298 format(' *** SPIN NUMBER MISMATCH FOR CHARGE DENSITY ON DISK!')  
+299 format(' *** CHARGE DENSITY ON DISK LOOKS FUNNY!')  
+300 format(' <<<<<<<< REUSING CHARGE IN  MEMORY >>>>>>>>')  
+398 format(' *** SPIN NUMBER MISMATCH FOR MIXED POTENTIAL ON DISK!')  
+
+399 format(' *** MIXED POTENTIAL ON DISK LOOKS FUNNY!')
+
+  end subroutine screen
